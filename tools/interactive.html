@@ -1,10 +1,37 @@
 <!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Z9 research emulator</title>
-<style>body{margin:16px;background:#111;color:#eee;font:14px monospace}button{border:1px solid #888;border-radius:0;background:#222;color:#eee;padding:8px;margin-right:8px}img{display:block;width:min(1024px,100%);height:auto;margin:12px 0}pre{white-space:pre-wrap}</style>
+<style>body{margin:16px;background:#111;color:#eee;font:14px monospace}button{border:1px solid #888;border-radius:0;background:#222;color:#eee;padding:8px;margin-right:8px;cursor:pointer}button:focus-visible{outline:2px solid #eee;outline-offset:2px}button:active{background:#555}.pad{display:grid;grid-template-columns:repeat(3,52px);gap:6px;margin:12px 0}.pad button{margin:0;min-height:44px}.pad [data-key=up]{grid-column:2}.pad [data-key=left]{grid-column:1}.pad [data-key=down]{grid-column:2}#input-error{color:#ffb4a9}img{display:block;width:min(1024px,100%);height:auto;margin:12px 0}pre{white-space:pre-wrap}</style>
 <button onclick="key('menu')">MENU</button><button onclick="key('half-down')">Half shutter hold</button><button onclick="key('half-up')">Release</button>
+<div class="pad" role="group" aria-label="Menu navigation">
+<button data-key="up" onclick="key('up')" aria-label="Up">↑</button>
+<button data-key="left" onclick="key('left')" aria-label="Left">←</button>
+<button data-key="ok" onclick="key('ok')" aria-label="Confirm">OK</button>
+<button data-key="right" onclick="key('right')" aria-label="Right">→</button>
+<button data-key="down" onclick="key('down')" aria-label="Down">↓</button>
+</div>
+<p>Arrow keys: navigate · Enter: OK · M: MENU. Each press sends one step.</p>
+<p id="input-error" role="status" aria-live="polite"></p>
 <img id="frame" alt="Waiting for original camera LCD"><pre id="status">Starting</pre>
 <script>
-async function key(k){await fetch('/key/'+k,{method:'POST'})}
+let keyRequests=Promise.resolve();
+function key(k){
+    // Keep browser requests in order; the worker owns press/release timing.
+    keyRequests=keyRequests.then(async()=>{
+        const reply=await fetch('/key/'+k,{method:'POST'});
+        if(!reply.ok)throw new Error(reply.status===429?'Key queue is full; wait before pressing again.':reply.status===409?'Controls unavailable: the emulator stopped or an automatic menu test is running.':'Key request failed (HTTP '+reply.status+').');
+        document.getElementById('input-error').textContent='';
+    }).catch(error=>{document.getElementById('input-error').textContent=error.message});
+    return keyRequests;
+}
+document.addEventListener('keydown',event=>{
+    if(event.altKey||event.ctrlKey||event.metaKey||event.target.isContentEditable||['INPUT','TEXTAREA','SELECT'].includes(event.target.tagName))return;
+    const command={ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right',Enter:'ok',m:'menu',M:'menu'}[event.key];
+    if(!command)return;
+    // Enter always confirms, including when a direction button has focus.
+    // Prevent its native button click as well as arrow-key page scrolling.
+    event.preventDefault();
+    if(!event.repeat)key(command);
+});
 async function update(){try{const s=await(await fetch('/status')).json();document.getElementById('status').textContent=JSON.stringify(s,null,2);const b=await(await fetch('/frame')).blob();if(b.size){const img=document.getElementById('frame'),old=img.src;img.src=URL.createObjectURL(b);if(old.startsWith('blob:'))URL.revokeObjectURL(old)}}catch(e){document.getElementById('status').textContent=String(e)}setTimeout(update,500)}update();
 </script>

@@ -18,6 +18,22 @@ hold returns from menus through the original firmware's key path. Release
 releases half-shutter. All inputs are synthetic MCU messages; they do not
 alter application state directly.
 
+Use the direction pad to navigate and OK to confirm. Keyboard shortcuts are
+the arrow keys, Enter for OK and M for MENU. A click or key press sends one
+complete press/release pair; keyboard auto-repeat is ignored. Navigation also
+releases a held half-shutter first. Inputs run in order, with pulse and release
+gaps measured in guest virtual time after MCU receive retirement. Directions
+use a 60 ms pulse and a 500 ms release gap; OK uses a 60 ms pulse and a 2 s
+gap, and MENU a 400 ms pulse and a 2 s gap. These reuse the existing synthetic
+contact mappings; actual menu selection still needs firmware/LCD validation.
+
+The local POST routes are `/key/up`, `/key/down`, `/key/left`, `/key/right`,
+`/key/ok`, `/key/menu`, `/key/half-down` and `/key/half-up`. They require an
+Origin matching this server's `http://127.0.0.1:PORT` or `http://localhost:PORT`.
+A successful enqueue returns 204, a full queue 429, and stopped sessions or
+automatic `--menu-test` runs reject manual input with 409. Internal releases
+do not use the bounded HTTP queue, so a full queue cannot discard a release.
+
 The browser receives PNG snapshots of QEMU's actual LCD surface. It does not
 render its own ISO, shutter, menu, icons, no-card mark or video background.
 The displayed RAW/LCD counters are diagnostic host state. Initial startup

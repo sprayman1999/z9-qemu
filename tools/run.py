@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Boot and control the local experimental Z9. No camera or USB access."""
 import argparse
+from collections import deque
 import io
 import json
 from pathlib import Path
@@ -17,6 +18,62 @@ from service_z9_mcu import Peer
 from service_serial8 import WritePeer
 from z9_global1_boundary_input import Peer as BoundaryPeer
 from validate_run import MenuAcceptance
+from z9_navigation_input import BINDINGS, key_body as navigation_body
+
+KEY_COMMANDS = frozenset(BINDINGS) | {'half-down', 'half-up'}
+
+
+class KeyController:
+    """Serialize complete contacts and time pulses after MCU RX retirement.
+
+    The worker owns this controller and sends each returned body while stopped.
+    Holds and debounce gaps use guest virtual time, including when host input
+    arrives faster than the guest can process it.
+    """
+    def __init__(self, peer):
+        self.peer = peer
+        self.half = True  # boot() leaves half-shutter held
+        self.steps = deque()
+        self.busy = False
+        self.waiting = False
+        self.due = 0
+
+    def start(self, command):
+        if command not in KEY_COMMANDS:
+            raise ValueError('unsupported interactive key')
+        if self.busy:
+            raise RuntimeError('previous key has not finished')
+        self.due = 0
+        self.busy = True
+        if command in ('half-down', 'half-up'):
+            self.half = command == 'half-down'
+            self.steps.append((key_body(half=self.half), 500_000_000))
+        else:
+            if self.half:
+                self.steps.append((navigation_body(), 400_000_000))
+            self.half = False
+            hold = 400_000_000 if command == 'menu' else 60_000_000
+            gap = 2_000_000_000 if command in ('menu', 'ok') else 500_000_000
+            self.steps.extend(((navigation_body(command), hold), (navigation_body(), gap)))
+
+    def next_body(self, virtual_ns):
+        if not self.busy:
+            return None
+        if self.waiting:
+            # RX can still be waiting behind a TX ACK or protocol replies.
+            # Accepted RX also has to retire through the original flag clear.
+            if self.peer.pending or self.peer.rx is not None or self.peer.rx_retiring:
+                return None
+            self.waiting = False
+            self.due = virtual_ns + self.delay
+        if virtual_ns < self.due:
+            return None
+        if not self.steps:
+            self.busy = False
+            return None
+        body, self.delay = self.steps.popleft()
+        self.waiting = True
+        return body
 
 class Session:
     def __init__(self):
@@ -40,7 +97,8 @@ def worker(a,s):
             clock=BoundaryPeer(g,33,auxiliary_masked=True)
             spi8=WritePeer(g);spi9=WritePeer(g,channel=9,wire_bits=9,allow_dummy_rx=True)
             next_capture=0;deadline=time.monotonic()+a.seconds if a.seconds else float('inf')
-            automatic=[];initial_frames=0;half=True;explicit_stop=False
+            keys=KeyController(peer)
+            initial_frames=0;explicit_stop=False
             acceptance=MenuAcceptance(g,peer,s.progress,virtual_clock=True) if a.menu_test else None
             g.qmp.command('cont')
             while not s.stop.is_set() and time.monotonic()<deadline:
@@ -64,25 +122,24 @@ def worker(a,s):
                            lcd.get('last_frame_has_video',False))
                     s.status=dict(phase='Running' if ready else 'Waiting for live view',ready=ready,
                         raw_frames=raw['frames'],raw_bytes=raw['bytes'],lcd_video_frames=lcd.get('video_frames',0),
-                        output=str(g.out),half_held=half)
+                        output=str(g.out),half_held=keys.half,queued_keys=s.commands.qsize(),key_busy=keys.busy)
                     if ready and not initial_frames:
                         initial_frames=raw['frames'];s.progress('Original LCD is receiving RAW-derived video')
                     if acceptance:acceptance.tick(now,raw,lcd,screen)
                     g.data['latest_pipeline']=dict(raw=raw,lcd=lcd)
                     next_capture=now+.5;g.qmp.command('cont')
                     if acceptance and acceptance.done:break
-                key_now=state(g,'runtime-clock-state')['virtual_ns']/1e9
-                if automatic and key_now>=automatic[0][0]:s.commands.put_nowait(automatic.pop(0)[1])
-                if not s.commands.empty():
-                    cmd=s.commands.get_nowait();g.qmp.command('stop');peer.handle()
-                    if cmd=='menu':
-                        half=False;peer.enqueue_external(key_body(),2)
-                        automatic=sorted(automatic+[(key_now+.4,'menu-down'),(key_now+.8,'menu-up')])
-                    else:
-                        if cmd.startswith('half-'):half=cmd=='half-down'
-                        peer.enqueue_external(key_body(menu=cmd=='menu-down',half=half),2)
-                    g.data.setdefault('keys',[]).append(dict(command=cmd,host_time=now,virtual_time=key_now))
-                    g.qmp.command('cont')
+                if keys.busy or not s.commands.empty():
+                    key_now=state(g,'runtime-clock-state')['virtual_ns']
+                    body=keys.next_body(key_now)
+                    if not keys.busy and not s.commands.empty():
+                        cmd=s.commands.get_nowait();keys.start(cmd)
+                        g.data.setdefault('keys',[]).append(dict(command=cmd,host_time=now,virtual_time=key_now/1e9))
+                        body=keys.next_body(key_now)
+                    if body is not None:
+                        g.qmp.command('stop');peer.handle()
+                        peer.enqueue_external(body,2)
+                        g.qmp.command('cont')
                 channels=state(g,'serial-state')
                 if peer.clock_if_ready(channels):explicit_stop=True;continue
                 spi8.clock_if_ready(channels[8]);spi9.clock_if_ready(channels[9])
@@ -108,6 +165,30 @@ class PreparedGuest(Guest):
 
 Guest=PreparedGuest
 
+def make_handler(s,port,*,menu_test=False):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self,*args):pass
+        def do_GET(self):
+            route=self.path.split('?',1)[0]
+            if route=='/':data=(ROOT/'tools/interactive.html').read_bytes();kind='text/html; charset=utf-8'
+            elif route=='/status':data=json.dumps(s.status).encode();kind='application/json'
+            elif route=='/frame':data=s.png;kind='image/png'
+            else:self.send_error(404);return
+            self.send_response(200);self.send_header('Content-Type',kind);self.send_header('Cache-Control','no-store')
+            self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+        def do_POST(self):
+            # Local UI only; reject cross-origin form submissions.
+            if self.headers.get('Origin') not in (f'http://127.0.0.1:{port}',f'http://localhost:{port}'):
+                self.send_error(403);return
+            cmd=self.path.removeprefix('/key/')
+            if cmd not in KEY_COMMANDS or self.path!='/key/'+cmd:self.send_error(400);return
+            if s.stop.is_set() or menu_test:self.send_error(409);return
+            try:s.commands.put_nowait(cmd)
+            except queue.Full:self.send_error(429);return
+            self.send_response(204);self.end_headers()
+    return Handler
+
+
 def main():
     resource.setrlimit(resource.RLIMIT_CORE,(0,0))
     p=argparse.ArgumentParser(description=__doc__)
@@ -123,26 +204,7 @@ def main():
         worker(a,s)
         if 'error' in s.status:raise SystemExit(1)
         return
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self,*args):pass
-        def do_GET(self):
-            route=self.path.split('?',1)[0]
-            if route=='/':data=(ROOT/'tools/interactive.html').read_bytes();kind='text/html; charset=utf-8'
-            elif route=='/status':data=json.dumps(s.status).encode();kind='application/json'
-            elif route=='/frame':data=s.png;kind='image/png'
-            else:self.send_error(404);return
-            self.send_response(200);self.send_header('Content-Type',kind);self.send_header('Cache-Control','no-store')
-            self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
-        def do_POST(self):
-            # Local UI only; reject cross-origin form submissions.
-            if self.headers.get('Origin') not in (f'http://127.0.0.1:{a.port}',f'http://localhost:{a.port}'):
-                self.send_error(403);return
-            cmd=self.path.removeprefix('/key/')
-            if cmd not in ('menu','half-down','half-up') or self.path!='/key/'+cmd:self.send_error(400);return
-            try:s.commands.put_nowait(cmd)
-            except queue.Full:self.send_error(429);return
-            self.send_response(204);self.end_headers()
-    server=ThreadingHTTPServer(('127.0.0.1',a.port),Handler)
+    server=ThreadingHTTPServer(('127.0.0.1',a.port),make_handler(s,a.port,menu_test=a.menu_test))
     task=threading.Thread(target=worker,args=(a,s),daemon=True);task.start()
     print(f'http://127.0.0.1:{a.port}/',flush=True)
     try:server.serve_forever(poll_interval=.2)

@@ -26,20 +26,28 @@ def parse_actions(text):
     return actions
 
 
+def key_body(action=None):
+    """A complete released contact state, optionally with one navigation key."""
+    body = bytearray(124)
+    body[0] = body[4] = 1
+    if action is not None:
+        byte, _, _ = BINDINGS[action]
+        body[byte] = 1
+    return bytes(body)
+
+
 def states(actions):
-    def record(label, binding=None):
-        body = bytearray(124)
-        body[0] = body[4] = 1
+    def record(label, action=None):
+        body = key_body(action)
         sw0, sw1 = 0x200, 0
-        if binding is not None:
-            byte, mask0, mask1 = binding
-            body[byte] = 1
+        if action is not None:
+            _, mask0, mask1 = BINDINGS[action]
             sw0 |= mask0
             sw1 |= mask1
         return dict(label=label, body_hex=body.hex(),
                     expected_hex=struct.pack('<11I', sw0, sw1, *([0]*9)).hex())
     output = [record('navigation-initial-release')]
     for action in actions:
-        output.append(record('navigation-'+action+'-press', BINDINGS[action]))
+        output.append(record('navigation-'+action+'-press', action))
         output.append(record('navigation-'+action+'-release'))
     return output

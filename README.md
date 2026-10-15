@@ -78,8 +78,10 @@ python tools/run.py --firmware /absolute/path/to/z9-main-payload.bin
 ```
 
 Open **http://127.0.0.1:8789/**. Wait for the original live-view image and
-nonzero RAW/LCD counters. MENU and half-shutter inputs go through the original
-MCU receive path. Use **Half shutter hold** to leave the menu for shooting,
+nonzero RAW/LCD counters. Use the direction pad or arrow keys to navigate,
+**OK** or Enter to confirm, and **MENU** or M to open the menu. Each press sends
+one complete MCU press/release pair; navigation releases half-shutter first.
+Use **Half shutter hold** to leave the menu for shooting,
 and **Release** to release that input. Ctrl+C stops the owned emulator.
 
 The default input is locally generated color bars with a luminance ramp. To

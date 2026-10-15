@@ -33,7 +33,9 @@ python tools/run.py --firmware /绝对路径/z9-main-payload.bin
 ```
 
 打开 `http://127.0.0.1:8789/`。等待原厂画面与 RAW/LCD 计数出现后操作。
-MENU 进入菜单，Half shutter hold 半按返回拍摄，Release 释放半按。Ctrl+C 退出。
+MENU 进入菜单，方向按钮或键盘方向键导航，OK 或 Enter 确认，M 发送 MENU。
+每次点击或按键发送一次完整按下/释放；导航前自动释放半按。Half shutter hold 半按返回拍摄，
+Release 释放半按。Ctrl+C 退出。
 需要自己的图片时，先运行 `python tools/make_cmos.py --image /路径/图片.jpg`。
 
 拍摄完整 RAW 时先退出取景进程，再运行：

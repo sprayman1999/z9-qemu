@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 import struct
 import json
+import io
 import sys
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 import numpy as np
 from PIL import Image
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
@@ -14,6 +16,135 @@ from boot import key_body
 from service_z9_mcu import Peer
 from validate_run import MenuAcceptance
 from z9_global1_boundary_input import Peer as BoundaryPeer
+from z9_navigation_input import key_body as navigation_body, states as navigation_states
+from run import KEY_COMMANDS, KeyController, Session, make_handler
+
+
+class InteractiveKeys(unittest.TestCase):
+    def peer(self):
+        # Use the actual external-frame encoder without a firmware process.
+        peer = Peer.__new__(Peer)
+        peer.pending = []
+        peer.rx = None
+        peer.rx_retiring = False
+        peer.start_rx = lambda: None
+        return peer
+
+    def send(self, keys, now):
+        body = keys.next_body(now)
+        self.assertIsNotNone(body)
+        keys.peer.enqueue_external(body, 2)
+        family, queued, frame = keys.peer.pending.pop(0)
+        self.assertEqual((family, queued), (2, body))
+        self.assertEqual(len(frame), 256)
+        self.assertEqual(sum(frame) & 255, 255)
+        self.assertEqual(frame[8:132], body)
+        return body
+
+    def test_navigation_contacts_and_existing_decoder_contract(self):
+        mappings = {'right': (0x22, 0x280, 0), 'left': (0x23, 0x240, 0),
+                    'up': (0x24, 0x220, 0), 'down': (0x25, 0x210, 0),
+                    'menu': (0x43, 0x200, 0x8000), 'ok': (0x4a, 0x200, 1)}
+        self.assertEqual(navigation_body(), key_body())
+        self.assertEqual(navigation_body('menu'), key_body(menu=True))
+        for action, (offset, sw0, sw1) in mappings.items():
+            with self.subTest(action=action):
+                body = navigation_body(action)
+                self.assertEqual(len(body), 124)
+                self.assertEqual([i for i in range(124) if body[i] != key_body()[i]], [offset])
+                initial, press, release = navigation_states([action])
+                self.assertEqual(press['body_hex'], body.hex())
+                self.assertEqual(press['expected_hex'], struct.pack('<11I', sw0, sw1, *([0]*9)).hex())
+                self.assertEqual(initial['body_hex'], release['body_hex'])
+
+    def test_short_pulses_wait_for_receive_retirement_and_release_gap(self):
+        for action in ('up', 'down', 'left', 'right', 'ok', 'menu'):
+            with self.subTest(action=action):
+                peer = self.peer();keys = KeyController(peer);keys.half = False
+                keys.start(action)
+                self.assertEqual(self.send(keys, 0), navigation_body(action))
+                peer.pending.append(object())
+                self.assertIsNone(keys.next_body(1_000_000_000))
+                peer.pending.clear();peer.rx = object()
+                self.assertIsNone(keys.next_body(2_000_000_000))
+                peer.rx = None;peer.rx_retiring = True
+                self.assertIsNone(keys.next_body(3_000_000_000))
+                peer.rx_retiring = False
+                self.assertIsNone(keys.next_body(4_000_000_000))
+                hold = 400_000_000 if action == 'menu' else 60_000_000
+                release_at = 4_000_000_000 + hold
+                self.assertIsNone(keys.next_body(release_at-1))
+                self.assertEqual(self.send(keys, release_at), key_body())
+                self.assertIsNone(keys.next_body(release_at))
+                gap = 2_000_000_000 if action in ('menu', 'ok') else 500_000_000
+                self.assertIsNone(keys.next_body(release_at+gap-1))
+                self.assertTrue(keys.busy)
+                with self.assertRaises(RuntimeError):keys.start('left')
+                self.assertIsNone(keys.next_body(release_at+gap))
+                self.assertFalse(keys.busy)
+
+    def test_half_shutter_is_released_before_navigation(self):
+        keys = KeyController(self.peer())
+        keys.start('right')
+        self.assertFalse(keys.half)
+        self.assertEqual(self.send(keys, 0), key_body())
+        self.assertIsNone(keys.next_body(0))
+        self.assertIsNone(keys.next_body(399_999_999))
+        self.assertEqual(self.send(keys, 400_000_000), navigation_body('right'))
+
+    def test_half_hold_and_release_remain_complete_inputs(self):
+        keys = KeyController(self.peer())
+        now = 0
+        for command, half in (('half-down', True), ('half-up', False)):
+            keys.start(command)
+            self.assertEqual(self.send(keys, now), key_body(half=half))
+            self.assertEqual(keys.half, half)
+            self.assertIsNone(keys.next_body(now))
+            now += 500_000_000
+            self.assertIsNone(keys.next_body(now))
+            self.assertFalse(keys.busy)
+
+    def request(self, session, path, *, origin='http://127.0.0.1:8789', menu_test=False):
+        class Socket:
+            def __init__(self):self.output = bytearray()
+            def makefile(self, *args):
+                headers = '' if origin is None else f'Origin: {origin}\r\n'
+                return io.BytesIO(f'POST {path} HTTP/1.0\r\n{headers}Content-Length: 0\r\n\r\n'.encode())
+            def sendall(self, data):self.output.extend(data)
+        sock = Socket()
+        make_handler(session, 8789, menu_test=menu_test)(sock, ('127.0.0.1', 12345), SimpleNamespace())
+        return int(sock.output.split(b' ', 2)[1])
+
+    def test_http_commands_queue_in_order_and_reject_invalid_requests(self):
+        session = Session()
+        commands = ['menu', 'up', 'down', 'left', 'right', 'ok', 'half-down', 'half-up']
+        self.assertEqual(set(commands), KEY_COMMANDS)
+        for command in commands:
+            self.assertEqual(self.request(session, '/key/'+command), 204)
+        self.assertEqual([session.commands.get_nowait() for _ in commands], commands)
+        for path in ('/key/touch', '/key/up?x=1', '/key/menu-down', '/up', '/key/up/'):
+            self.assertEqual(self.request(session, path), 400)
+        for origin in (None, 'https://example.com', 'http://127.0.0.1:9999'):
+            self.assertEqual(self.request(session, '/key/up', origin=origin), 403)
+        self.assertTrue(session.commands.empty())
+        self.assertEqual(self.request(session, '/key/ok', origin='http://localhost:8789'), 204)
+
+    def test_full_http_queue_cannot_discard_internal_key_release(self):
+        session = Session();keys = KeyController(self.peer());keys.half = False
+        keys.start('down')
+        self.assertEqual(self.send(keys, 0), navigation_body('down'))
+        self.assertIsNone(keys.next_body(0))
+        for _ in range(16):self.assertEqual(self.request(session, '/key/up'), 204)
+        self.assertEqual(self.request(session, '/key/up'), 429)
+        self.assertEqual(self.send(keys, 60_000_000), key_body())
+        self.assertEqual(session.commands.qsize(), 16)
+
+    def test_stopped_and_automatic_test_sessions_reject_manual_input(self):
+        session = Session()
+        self.assertEqual(self.request(session, '/key/up', menu_test=True), 409)
+        session.stop.set()
+        self.assertEqual(self.request(session, '/key/up'), 409)
+        self.assertTrue(session.commands.empty())
 
 class BoundaryClockTests(unittest.TestCase):
     def test_pause_dropped_periods_and_record_cap_do_not_change_delivery(self):
