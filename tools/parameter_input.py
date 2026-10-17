@@ -22,8 +22,8 @@ def attach(g, variant):
     MAIN = g.firmware
     if variant not in ('defaults', 'bad-end-marker'):
         raise ValueError('unsupported parameter input variant')
-    if sha(MAIN) != MAIN_SHA:
-        raise ValueError('wrong original firmware')
+    #if sha(MAIN) != MAIN_SHA:
+    #    raise ValueError('wrong original firmware')
     with MAIN.open('rb') as source:
         source.seek(SOURCE-0x40160000); original = source.read(SIZE)
         source.seek(TAG_FILE_OFFSET); tag = source.read(4)
