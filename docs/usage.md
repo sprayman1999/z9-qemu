@@ -34,6 +34,64 @@ A successful enqueue returns 204, a full queue 429, and stopped sessions or
 automatic `--menu-test` runs reject manual input with 409. Internal releases
 do not use the bounded HTTP queue, so a full queue cannot discard a release.
 
+Playback sends the original camera's PLAY key, rather than opening a host
+image viewer. Use **Playback** (P), then the existing direction pad and OK.
+**Thumbnails / −** (minus) and **Zoom / +** (plus or equals) send the original
+THUMBNAIL and ZOOM keys. **Half shutter hold** returns to shooting through
+the existing half-shutter input; however, fresh live view did not recover
+after the tested no-card playback path and the LCD remained black. This
+recovery path is unresolved. **Release mode** (R) sends the physical
+RELEASE_MODE key. Use the **Drive** selector for S (single), CL (continuous
+low) or CH (continuous high). It changes the absolute MCU dial position and
+preserves that position in later navigation, release and half-shutter frames.
+The input selection does not claim continuous shooting acceptance.
+
+The additional POST routes are `/key/playback`, `/key/thumbnail`, `/key/zoom`,
+`/key/release-mode`, `/key/drive-single`, `/key/drive-cl` and `/key/drive-ch`.
+
+To let the original firmware read existing photographs, supply an actual
+raw virtual card from a completed capture run:
+
+```sh
+python tools/run.py --firmware /path/to/main.bin \
+    --card /path/to/completed-capture/capture-card.raw
+```
+
+The file must be a regular `.raw` disk image with an MBR exFAT partition.
+It is attached to the modeled NVMe controller before boot. QEMU uses a
+temporary snapshot for metadata writes; the supplied backing card is opened
+read-only and changes are discarded on exit. The default without `--card`
+still has no card. Native file reading, JPEG decoding and the resulting LCD
+must be checked in a firmware-dependent run; successful key delivery alone
+does not establish working photograph playback.
+
+The original-firmware run on 2026-10-17 verified that PLAY leaves live view
+and displays the camera's own "No memory card." message. That run had no
+card attached, so it does not validate file browsing, thumbnails or decoded
+photographs. See [validation status](testing.md).
+
+The new contact mappings are pinned to the documented Z9 C5.32 firmware:
+
+| Key | MCU body byte | Decoded SW1 mask | Native UI key |
+| --- | --- | --- | --- |
+| PLAY | `0x44` | `0x00000002` | `0x2e` |
+| THUMBNAIL | `0x4c` | `0x00000004` | `0x1a` |
+| ZOOM | `0x4b` | `0x00000008` | `0x19` |
+| RELEASE_MODE | `0x10` | `0x08000000` | `0x26` |
+
+The original decoder at `0x41024e90`, key-name masks and the translation
+table at `0x41fb0fac` corroborate these fields. The original handler at
+`0x4045e594` dispatches thumbnail and zoom keys. These are static
+interoperability observations, not physical timing or LCD acceptance.
+
+The drive selector is MCU body byte `0x11`: 0 for S, 1 for CL and 2 for CH.
+It becomes the decoder's ushort at `+0x22`, then original key status `+0x6e`.
+The consumer at `0x40d32aa4` submits the observed value to setting `0x02000006`;
+the original setter chain through `0x410e83d8` derives release mode and speed.
+The low/high distinction is corroborated by the original named
+`ReleaseSpeedContLow` / `ReleaseSpeedContHigh` consumers. No application RAM
+or setting value is directly written by the controller.
+
 The browser receives PNG snapshots of QEMU's actual LCD surface. It does not
 render its own ISO, shutter, menu, icons, no-card mark or video background.
 The displayed RAW/LCD counters are diagnostic host state. Initial startup
@@ -66,7 +124,7 @@ selected dimensions. This is a test fixture, not a physical sensor protocol.
 
 For shutter release, a full NEF on a virtual card, fresh post-shot live view
 and two post-shot menu returns, use the separate [capture workflow](capture.md).
-The browser preview profile does not attach a card or expose full shutter/REC.
+The browser preview profile attaches a card only with `--card` and does not expose full shutter/REC.
 The capture profile uses full-size 8256×5504/14-bit host input (or 8280×5520), opt-in image/storage
 models and a request-bound CCOMP MCU/GPIO peer. Do not combine it with another
 running preview process or count LCD video as a movie recording.

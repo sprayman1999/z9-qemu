@@ -84,6 +84,19 @@ one complete MCU press/release pair; navigation releases half-shutter first.
 Use **Half shutter hold** to leave the menu for shooting,
 and **Release** to release that input. Ctrl+C stops the owned emulator.
 
+**Playback** (P), **Thumbnails / −** and **Zoom / +** send the original LCD
+playback controls. Use `--card /path/to/capture-card.raw` to attach an existing
+photograph card with a temporary snapshot. **Release mode** (R) sends the
+physical release-mode key; the **Drive** selector supplies S, CL or CH dial
+positions and preserves them across later keys. Original-firmware PLAY entry has been checked with
+no card (the native LCD reports "No memory card."); photograph browsing and
+actual continuous shooting still require their own runtime validation. The
+Drive selector has been checked against the original S, CH/20 and CL/5 LCD
+indicators, including CL retention after navigation.
+No-card playback currently leaves a black LCD after half-shutter return;
+fresh live-view recovery remains unresolved.
+See [controls](docs/usage.md).
+
 The default input is locally generated color bars with a luminance ramp. To
 use your own image, run `python tools/make_cmos.py --image /path/to/photo.jpg`
 before starting the emulator. The 640×480, 12-bit test input is a convenience;

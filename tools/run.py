@@ -20,7 +20,9 @@ from z9_global1_boundary_input import Peer as BoundaryPeer
 from validate_run import MenuAcceptance
 from z9_navigation_input import BINDINGS, key_body as navigation_body
 
-KEY_COMMANDS = frozenset(BINDINGS) | {'half-down', 'half-up'}
+DRIVE_MODES = {'drive-single': 0, 'drive-cl': 1, 'drive-ch': 2}
+DRIVE_LABELS = {0: 'S', 1: 'CL', 2: 'CH'}
+KEY_COMMANDS = frozenset(BINDINGS) | frozenset(DRIVE_MODES) | {'half-down', 'half-up'}
 
 
 class KeyController:
@@ -33,10 +35,17 @@ class KeyController:
     def __init__(self, peer):
         self.peer = peer
         self.half = True  # boot() leaves half-shutter held
+        self.release_mode = 0  # complete boot contacts select S
         self.steps = deque()
         self.busy = False
         self.waiting = False
         self.due = 0
+
+    def contact(self, body):
+        data = bytearray(body)
+        # This is an absolute dial position, not a press/release bit.
+        data[0x11] = self.release_mode
+        return bytes(data)
 
     def start(self, command):
         if command not in KEY_COMMANDS:
@@ -45,16 +54,23 @@ class KeyController:
             raise RuntimeError('previous key has not finished')
         self.due = 0
         self.busy = True
-        if command in ('half-down', 'half-up'):
+        if command in DRIVE_MODES:
+            if self.half:
+                self.steps.append((self.contact(navigation_body()), 400_000_000))
+            self.half = False
+            self.release_mode = DRIVE_MODES[command]
+            self.steps.append((self.contact(navigation_body()), 2_000_000_000))
+        elif command in ('half-down', 'half-up'):
             self.half = command == 'half-down'
-            self.steps.append((key_body(half=self.half), 500_000_000))
+            self.steps.append((self.contact(key_body(half=self.half)), 500_000_000))
         else:
             if self.half:
-                self.steps.append((navigation_body(), 400_000_000))
+                self.steps.append((self.contact(navigation_body()), 400_000_000))
             self.half = False
             hold = 400_000_000 if command == 'menu' else 60_000_000
-            gap = 2_000_000_000 if command in ('menu', 'ok') else 500_000_000
-            self.steps.extend(((navigation_body(command), hold), (navigation_body(), gap)))
+            gap = 2_000_000_000 if command in ('menu', 'ok', 'playback', 'release-mode') else 500_000_000
+            self.steps.extend(((self.contact(navigation_body(command)), hold),
+                               (self.contact(navigation_body()), gap)))
 
     def next_body(self, virtual_ns):
         if not self.busy:
@@ -90,7 +106,7 @@ def worker(a,s):
         if binary is None:
             manifest=json.loads((ROOT/'.local/build-manifest.json').read_text())
             binary=Path(manifest['binary'])
-        with Guest(a.firmware,binary,a.raw,a.output) as g:
+        with Guest(a.firmware,binary,a.raw,a.output,card=a.card) as g:
             # ROM fixtures must be attached before process launch; see main.
             boot(g,s.progress)
             peer=Peer(g,limit_frames=1024,config_reply=True,all_mode_replies=True)
@@ -120,9 +136,12 @@ def worker(a,s):
                         buf=io.BytesIO();im.save(buf,format='PNG');s.png=buf.getvalue()
                     ready=(raw['frames']>=8 and lcd.get('video_frames',0)>=8 and
                            lcd.get('last_frame_has_video',False))
-                    s.status=dict(phase='Running' if ready else 'Waiting for live view',ready=ready,
+                    available=ready or bool(initial_frames)
+                    s.status=dict(phase='Running' if available else 'Waiting for live view',ready=available,
+                        live_view=ready,
                         raw_frames=raw['frames'],raw_bytes=raw['bytes'],lcd_video_frames=lcd.get('video_frames',0),
-                        output=str(g.out),half_held=keys.half,queued_keys=s.commands.qsize(),key_busy=keys.busy)
+                        output=str(g.out),half_held=keys.half,queued_keys=s.commands.qsize(),key_busy=keys.busy,
+                        card_attached=a.card is not None,drive_mode=DRIVE_LABELS[keys.release_mode])
                     if ready and not initial_frames:
                         initial_frames=raw['frames'];s.progress('Original LCD is receiving RAW-derived video')
                     if acceptance:acceptance.tick(now,raw,lcd,screen)
@@ -156,6 +175,16 @@ def worker(a,s):
     finally:s.stop.set()
 
 class PreparedGuest(Guest):
+    def __init__(self,*args,card=None):
+        super().__init__(*args)
+        try:
+            if card is not None:
+                from virtual_recording_card import attach_existing
+                attach_existing(self,card)
+        except BaseException as exc:
+            self.__exit__(type(exc),exc,None)
+            raise
+
     def __enter__(self):
         try:prepare(self)
         except BaseException as exc:
@@ -194,6 +223,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--firmware',type=Path,required=True);p.add_argument('--qemu',type=Path)
     p.add_argument('--raw',type=Path,default=ROOT/'.local/input.raw')
+    p.add_argument('--card',type=Path,help='existing raw exFAT virtual card; use a temporary QEMU snapshot for native playback')
     p.add_argument('--output',type=Path,default=ROOT/'.local'/time.strftime('run-%Y%m%d-%H%M%S'))
     p.add_argument('--port',type=int,default=8789);p.add_argument('--seconds',type=int,default=0)
     p.add_argument('--menu-test',action='store_true');p.add_argument('--headless',action='store_true')

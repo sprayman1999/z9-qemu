@@ -12,8 +12,46 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import struct
 import subprocess
+
+
+def attach_existing(guest, path):
+    """Attach a regular virtual card through PCIe before launch.
+
+    The original firmware reads and renders its own photographs. QEMU uses
+    an ephemeral overlay for filesystem metadata writes; the supplied card
+    remains the read-only backing image. No camera files are manufactured.
+    """
+    path = Path(path).resolve()
+    info = path.stat()
+    if not stat.S_ISREG(info.st_mode) or path.suffix.lower() != '.raw':
+        raise ValueError('Existing regular .raw virtual card required')
+    if any(char in str(path) for char in (',', '\n', '\r')):
+        raise ValueError('Virtual card path cannot contain commas or newlines')
+    with path.open('rb') as stream:
+        mbr = stream.read(512)
+        if len(mbr) != 512 or mbr[510:] != b'\x55\xaa' or mbr[450] != 7:
+            raise ValueError('Expected a virtual card with an MBR exFAT partition')
+        first, sectors = struct.unpack_from('<II', mbr, 454)
+        offset, length = first * 512, sectors * 512
+        if first < 1 or length < 512 or offset + length > info.st_size:
+            raise ValueError('Virtual card partition is truncated or outside its image')
+        stream.seek(offset)
+        boot = stream.read(512)
+        if len(boot) != 512 or boot[3:11] != b'EXFAT   ' or boot[510:] != b'\x55\xaa':
+            raise ValueError('Expected an existing exFAT virtual card')
+    if guest.proc is not None:
+        raise ValueError('Attach the virtual card before launching QEMU')
+    guest.command[guest.command.index('-M')+1] += (
+        ',pcie-link-diagnostic-mask=4,pcie-dbi-model=on,pcie-ram-dma-input=on,'
+        'pcie-image-ram-dma-input=on,pcie-intx-model=on')
+    guest.command += ['-drive', f'file={path},if=none,id=card,format=raw,snapshot=on',
+                      '-device', 'nvme,drive=card,serial=WL-Z9-PLAYBACK,bus=dw-pcie,addr=0']
+    guest.data['playback_card'] = dict(path=str(path), bytes=info.st_size,
+        partition_offset=offset, partition_bytes=length, temporary_snapshot=True,
+        source_read_only=True, native_playback_verified=False)
 
 
 

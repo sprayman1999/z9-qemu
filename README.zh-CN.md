@@ -36,6 +36,14 @@ python tools/run.py --firmware /绝对路径/z9-main-payload.bin
 MENU 进入菜单，方向按钮或键盘方向键导航，OK 或 Enter 确认，M 发送 MENU。
 每次点击或按键发送一次完整按下/释放；导航前自动释放半按。Half shutter hold 半按返回拍摄，
 Release 释放半按。Ctrl+C 退出。
+Playback（P）发送原厂回放键，缩略图和放大按钮用于 LCD 内浏览；可用
+`--card /路径/capture-card.raw` 临时快照挂载已有照片的虚拟卡。Release mode（R）
+发送释放模式键；Drive 下拉框通过 MCU 拨盘输入选择 S、CL 或 CH，并在后续按键中保留。
+已运行验证 PLAY 进入原厂“No memory card.”回放提示；
+已核对 LCD 的 S、CH/20、CL/5 标识及方向键后的 CL 保持；
+原厂照片浏览和实际连续拍摄仍需各自验证，
+详见[控制说明](docs/usage.md)。
+当前无卡回放后半按返回仍会停留黑屏，尚未通过恢复取景验收。
 需要自己的图片时，先运行 `python tools/make_cmos.py --image /路径/图片.jpg`。
 
 拍摄完整 RAW 时先退出取景进程，再运行：

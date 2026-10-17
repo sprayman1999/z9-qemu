@@ -44,7 +44,9 @@ class InteractiveKeys(unittest.TestCase):
     def test_navigation_contacts_and_existing_decoder_contract(self):
         mappings = {'right': (0x22, 0x280, 0), 'left': (0x23, 0x240, 0),
                     'up': (0x24, 0x220, 0), 'down': (0x25, 0x210, 0),
-                    'menu': (0x43, 0x200, 0x8000), 'ok': (0x4a, 0x200, 1)}
+                    'menu': (0x43, 0x200, 0x8000), 'ok': (0x4a, 0x200, 1),
+                    'playback': (0x44, 0x200, 2), 'release-mode': (0x10, 0x200, 0x08000000),
+                    'zoom': (0x4b, 0x200, 8), 'thumbnail': (0x4c, 0x200, 4)}
         self.assertEqual(navigation_body(), key_body())
         self.assertEqual(navigation_body('menu'), key_body(menu=True))
         for action, (offset, sw0, sw1) in mappings.items():
@@ -58,7 +60,7 @@ class InteractiveKeys(unittest.TestCase):
                 self.assertEqual(initial['body_hex'], release['body_hex'])
 
     def test_short_pulses_wait_for_receive_retirement_and_release_gap(self):
-        for action in ('up', 'down', 'left', 'right', 'ok', 'menu'):
+        for action in ('up', 'down', 'left', 'right', 'ok', 'menu', 'playback', 'release-mode', 'zoom', 'thumbnail'):
             with self.subTest(action=action):
                 peer = self.peer();keys = KeyController(peer);keys.half = False
                 keys.start(action)
@@ -76,7 +78,7 @@ class InteractiveKeys(unittest.TestCase):
                 self.assertIsNone(keys.next_body(release_at-1))
                 self.assertEqual(self.send(keys, release_at), key_body())
                 self.assertIsNone(keys.next_body(release_at))
-                gap = 2_000_000_000 if action in ('menu', 'ok') else 500_000_000
+                gap = 2_000_000_000 if action in ('menu', 'ok', 'playback', 'release-mode') else 500_000_000
                 self.assertIsNone(keys.next_body(release_at+gap-1))
                 self.assertTrue(keys.busy)
                 with self.assertRaises(RuntimeError):keys.start('left')
@@ -117,7 +119,8 @@ class InteractiveKeys(unittest.TestCase):
 
     def test_http_commands_queue_in_order_and_reject_invalid_requests(self):
         session = Session()
-        commands = ['menu', 'up', 'down', 'left', 'right', 'ok', 'half-down', 'half-up']
+        commands = ['menu', 'up', 'down', 'left', 'right', 'ok', 'half-down', 'half-up',
+                    'playback', 'release-mode', 'zoom', 'thumbnail', 'drive-single', 'drive-cl', 'drive-ch']
         self.assertEqual(set(commands), KEY_COMMANDS)
         for command in commands:
             self.assertEqual(self.request(session, '/key/'+command), 204)
@@ -145,6 +148,40 @@ class InteractiveKeys(unittest.TestCase):
         session.stop.set()
         self.assertEqual(self.request(session, '/key/up'), 409)
         self.assertTrue(session.commands.empty())
+
+    def test_drive_selector_persists_across_all_later_contacts(self):
+        keys = KeyController(self.peer());keys.half = False
+        now = 0
+        for command, selector in (('drive-ch', 2), ('playback', 2), ('left', 2),
+                                  ('half-down', 2), ('half-up', 2),
+                                  ('drive-cl', 1), ('menu', 1), ('drive-single', 0)):
+            keys.start(command)
+            bodies = []
+            for _ in range(12):
+                body = keys.next_body(now)
+                if body is not None:
+                    bodies.append(body)
+                    keys.peer.enqueue_external(body, 2)
+                    _, actual, frame = keys.peer.pending.pop(0)
+                    self.assertEqual(actual, body)
+                    self.assertEqual(sum(frame) & 255, 255)
+                if not keys.busy:break
+                now += 2_000_000_000
+            self.assertFalse(keys.busy)
+            self.assertTrue(bodies)
+            self.assertTrue(all(body[0x11] == selector for body in bodies))
+            if command in ('drive-single', 'drive-cl', 'drive-ch'):
+                self.assertEqual(len(bodies), 1)  # a dial position stays selected
+                self.assertTrue(all(value == 0 for i, value in enumerate(bodies[0]) if i not in (0, 4, 0x11)))
+
+    def test_drive_change_releases_half_with_previous_selector_first(self):
+        keys = KeyController(self.peer());keys.release_mode = 2
+        keys.start('drive-cl')
+        before = self.send(keys, 0)
+        self.assertEqual((before[7], before[0x11]), (0, 2))
+        self.assertIsNone(keys.next_body(0))
+        after = self.send(keys, 400_000_000)
+        self.assertEqual((after[7], after[0x11]), (0, 1))
 
 class BoundaryClockTests(unittest.TestCase):
     def test_pause_dropped_periods_and_record_cap_do_not_change_delivery(self):

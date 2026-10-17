@@ -1,5 +1,48 @@
 # Validation status
 
+## Native playback input update (2026-10-17)
+
+The public `tools/run.py` launcher was built locally with pinned QEMU 10.2.4
+and started with the original fingerprinted C5.32 MAIN and authored color bars.
+After actual live view appeared (RAW1811/LCD-video328), the browser sent PLAY.
+The complete family2 frame reached the original MCU receiver and the original
+LCD changed to "No memory card." No host viewer or replacement LCD raster was
+used. The bounded run exited normally, with all 2,032 recorded checks passing
+and no RAW destination rejection. Runtime memory and UI images remain private.
+
+This establishes the no-card playback entry only. Reading a photograph card,
+thumbnail browsing, decoded photo pixels, fresh live-view recovery after
+playback, release-mode selection and actual continuous burst remain separate
+acceptance tasks. The half-shutter return input was delivered, but fresh video
+did not return before that run's deadline; no recovery success is inferred.
+
+The change also passed 34 firmware-free Python tests, the C pixel contracts,
+default-off board realization and all 13 service-core event checks. A separate
+QEMU block-node inspection confirmed a writable temporary qcow2 overlay over
+a read-only raw backing file for the new `--card` attachment.
+
+Local tested executable SHA-256:
+`95f5d97da1da1ace5ac82d46f6a0e53484a7ee44b571d1a70cae342f0dfc3940`.
+Native result SHA-256:
+`b2ea7a5dabc7ae5f626d61f005c9dbcdbedb95f9865ef1da3c3da9a5cd3a4946`.
+
+A subsequent cold boot of the final persistent-dial controller verified the
+original LCD's S indicator, then the stacked-frame/20 display after selecting
+CH and stacked-frame/5 after selecting CL. CL remained on the original LCD
+after a LEFT press/release. PLAY while CL was selected again reached the
+original no-card playback message. The displayed 20/5 are configured camera
+indicators, not measured emulated or physical burst throughput. These checks
+establish release-mode selection and persistence; continuous photo writing
+and photograph-card playback remain unaccepted.
+
+That final controller run completed all 12 explicit contact frames, carrying
+selector values `0,2,1,1,1,1,1,1,1,1,1,0`, and exited normally with all 5,542
+recorded protocol checks passing. Both initial half-shutter return and a later
+release/half-shutter pair left the LCD black without fresh RAW/LCD video;
+this is a reproducible unresolved recovery failure, not a successful return.
+Final-run result SHA-256:
+`e3b1e277140cd84e2a0944d78c298f76378399398d6a78e27ed2f063e87727cd`.
+
 ## Full RAW capture update (2026-10-11)
 
 The current shared Z9 board passed a full shutter/capture/recovery workflow

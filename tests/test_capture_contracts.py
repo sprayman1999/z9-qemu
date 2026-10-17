@@ -15,10 +15,64 @@ from make_cmos import generate
 from mcu_frames import frames
 from ccomp_command_peer import reply_for
 from capture_workflow_ready import evaluate
-from virtual_recording_card import create
+from virtual_recording_card import create, attach_existing
+from types import SimpleNamespace
 
 
 class CaptureContracts(unittest.TestCase):
+    def playback_card(self, directory):
+        path = Path(directory)/'existing-card.raw'
+        mbr = bytearray(512)
+        mbr[450] = 7
+        struct.pack_into('<II', mbr, 454, 2, 128)
+        mbr[510:] = b'\x55\xaa'
+        boot = bytearray(512)
+        boot[3:11] = b'EXFAT   '
+        boot[510:] = b'\x55\xaa'
+        with path.open('xb') as stream:
+            stream.write(mbr)
+            stream.seek(1024)
+            stream.write(boot)
+            stream.truncate(130*512)
+        return path
+
+    def test_playback_card_uses_native_nvme_with_temporary_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.playback_card(directory)
+            before = path.read_bytes()
+            guest = SimpleNamespace(command=['qemu', '-M', 'nikon-z9-lab'], proc=None, data={})
+            attach_existing(guest, path)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertIn('pcie-intx-model=on', guest.command[2])
+            drive = guest.command[guest.command.index('-drive')+1]
+            self.assertIn('snapshot=on', drive)
+            self.assertIn('format=raw', drive)
+            self.assertIn(str(path), drive)
+            self.assertIn('nvme,drive=card,serial=WL-Z9-PLAYBACK,bus=dw-pcie,addr=0', guest.command)
+            self.assertTrue(guest.data['playback_card']['source_read_only'])
+            self.assertFalse(guest.data['playback_card']['native_playback_verified'])
+
+    def test_playback_rejects_truncated_or_non_exfat_cards_before_attach(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.playback_card(directory)
+            valid = path.read_bytes()
+            invalid = [valid[:511], valid[:1024], bytes(130*512),
+                       valid[:1027]+b'BADFS   '+valid[1035:]]
+            for body in invalid:
+                with self.subTest(bytes=len(body)):
+                    path.write_bytes(body)
+                    guest = SimpleNamespace(command=['qemu', '-M', 'nikon-z9-lab'], proc=None, data={})
+                    with self.assertRaises(ValueError):attach_existing(guest, path)
+                    self.assertEqual(guest.command, ['qemu', '-M', 'nikon-z9-lab'])
+                    self.assertEqual(guest.data, {})
+
+    def test_playback_cannot_attach_after_emulator_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.playback_card(directory)
+            guest = SimpleNamespace(command=['qemu', '-M', 'nikon-z9-lab'], proc=object(), data={})
+            with self.assertRaisesRegex(ValueError, 'before launching'):
+                attach_existing(guest, path)
+
     def test_full_capture_helpers_import_without_research_checkout(self):
         tools=Path(__file__).resolve().parents[1]/'tools'
         for path in sorted(tools.glob('capture_*.py')):

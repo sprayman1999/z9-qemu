@@ -3,6 +3,9 @@
 <title>Z9 research emulator</title>
 <style>body{margin:16px;background:#111;color:#eee;font:14px monospace}button{border:1px solid #888;border-radius:0;background:#222;color:#eee;padding:8px;margin-right:8px;cursor:pointer}button:focus-visible{outline:2px solid #eee;outline-offset:2px}button:active{background:#555}.pad{display:grid;grid-template-columns:repeat(3,52px);gap:6px;margin:12px 0}.pad button{margin:0;min-height:44px}.pad [data-key=up]{grid-column:2}.pad [data-key=left]{grid-column:1}.pad [data-key=down]{grid-column:2}#input-error{color:#ffb4a9}img{display:block;width:min(1024px,100%);height:auto;margin:12px 0}pre{white-space:pre-wrap}</style>
 <button onclick="key('menu')">MENU</button><button onclick="key('half-down')">Half shutter hold</button><button onclick="key('half-up')">Release</button>
+<button onclick="key('playback')">▶ Playback</button><button onclick="key('release-mode')">Release mode</button>
+<label>Drive <select id="drive-mode" aria-label="Drive mode" onchange="key(this.value)"><option value="drive-single">S · Single</option><option value="drive-cl">CL · Continuous low</option><option value="drive-ch">CH · Continuous high</option></select></label>
+<button onclick="key('thumbnail')">Thumbnails / −</button><button onclick="key('zoom')">Zoom / +</button>
 <div class="pad" role="group" aria-label="Menu navigation">
 <button data-key="up" onclick="key('up')" aria-label="Up">↑</button>
 <button data-key="left" onclick="key('left')" aria-label="Left">←</button>
@@ -10,7 +13,7 @@
 <button data-key="right" onclick="key('right')" aria-label="Right">→</button>
 <button data-key="down" onclick="key('down')" aria-label="Down">↓</button>
 </div>
-<p>Arrow keys: navigate · Enter: OK · M: MENU. Each press sends one step.</p>
+<p>Arrow keys: navigate · Enter: OK · M: MENU · P: playback · R: release mode · −/+: thumbnails/zoom. Each press sends one step.</p>
 <p id="input-error" role="status" aria-live="polite"></p>
 <img id="frame" alt="Waiting for original camera LCD"><pre id="status">Starting</pre>
 <script>
@@ -26,12 +29,12 @@ function key(k){
 }
 document.addEventListener('keydown',event=>{
     if(event.altKey||event.ctrlKey||event.metaKey||event.target.isContentEditable||['INPUT','TEXTAREA','SELECT'].includes(event.target.tagName))return;
-    const command={ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right',Enter:'ok',m:'menu',M:'menu'}[event.key];
+    const command={ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right',Enter:'ok',m:'menu',M:'menu',p:'playback',P:'playback',r:'release-mode',R:'release-mode','-':'thumbnail','+':'zoom','=':'zoom'}[event.key];
     if(!command)return;
     // Enter always confirms, including when a direction button has focus.
     // Prevent its native button click as well as arrow-key page scrolling.
     event.preventDefault();
     if(!event.repeat)key(command);
 });
-async function update(){try{const s=await(await fetch('/status')).json();document.getElementById('status').textContent=JSON.stringify(s,null,2);const b=await(await fetch('/frame')).blob();if(b.size){const img=document.getElementById('frame'),old=img.src;img.src=URL.createObjectURL(b);if(old.startsWith('blob:'))URL.revokeObjectURL(old)}}catch(e){document.getElementById('status').textContent=String(e)}setTimeout(update,500)}update();
+async function update(){try{const s=await(await fetch('/status')).json();document.getElementById('status').textContent=JSON.stringify(s,null,2);const drive=document.getElementById('drive-mode');if(s.drive_mode&&!s.queued_keys&&!s.key_busy&&document.activeElement!==drive)drive.value={S:'drive-single',CL:'drive-cl',CH:'drive-ch'}[s.drive_mode];const b=await(await fetch('/frame')).blob();if(b.size){const img=document.getElementById('frame'),old=img.src;img.src=URL.createObjectURL(b);if(old.startsWith('blob:'))URL.revokeObjectURL(old)}}catch(e){document.getElementById('status').textContent=String(e)}setTimeout(update,500)}update();
 </script>

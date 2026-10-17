@@ -1196,7 +1196,8 @@ def main():
                     gap=args.half_press_seconds*1000000000 if args.sequence=='shutter' and self.index==self.preparation_prefix+2 else 500000000
                     if row.get('label','').startswith('navigation-') and row.get('label','').endswith('-press'):
                         gap=args.navigation_press_ms*1000000
-                    if row.get('label') in ('navigation-menu-release','navigation-ok-release'):
+                    if row.get('label') in ('navigation-menu-release','navigation-ok-release',
+                                            'navigation-playback-release','navigation-release-mode-release'):
                         gap=2000000000
                     if args.post_capture_recovery and self.index==self.post_capture_start:
                         gap=10000000000
@@ -1229,7 +1230,8 @@ def main():
                     command=json.loads(args.navigation_file.read_text())
                     if set(command)-{'actions','finish','capture'} or not isinstance(command.get('actions'),list):
                         raise ValueError('bounded navigation JSON actions/finish/capture required')
-                    if any(type(x) is not str or x not in ('menu','right','left','up','down','ok') for x in command['actions']) or len(command['actions'])>32:
+                    from z9_navigation_input import BINDINGS
+                    if any(type(x) is not str or x not in BINDINGS for x in command['actions']) or len(command['actions'])>32:
                         raise ValueError('bounded navigation actions required')
                     if any(type(command.get(k,False)) is not bool for k in ('finish','capture')):
                         raise ValueError('navigation finish/capture must be booleans')

@@ -14,6 +14,10 @@ BINDINGS = {
     'down': (0x25, 0x10, 0),
     'menu': (0x43, 0, 0x8000),
     'ok': (0x4a, 0, 1),
+    'playback': (0x44, 0, 2),
+    'release-mode': (0x10, 0, 0x08000000),
+    'zoom': (0x4b, 0, 8),
+    'thumbnail': (0x4c, 0, 4),
 }
 
 
@@ -22,7 +26,7 @@ def parse_actions(text):
         return []
     actions = text.lower().split(',')
     if not 1 <= len(actions) <= 32 or any(x not in BINDINGS for x in actions):
-        raise ValueError('1..32 comma-separated menu/right/left/up/down/ok actions required')
+        raise ValueError('1..32 comma-separated actions required: ' + '/'.join(BINDINGS))
     return actions
 
 
