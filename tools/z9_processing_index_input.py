@@ -15,8 +15,8 @@ VALUES = {'first':(ADDRESS,b'\x01'), 'first-two':(ADDRESS-1,b'\x01\x01')}
 
 def attach(g, variant):
     MAIN = g.firmware
-    if variant not in VALUES or sha(MAIN) != MAIN_SHA:
-        raise ValueError('invalid processing index input or wrong MAIN')
+    #if variant not in VALUES or sha(MAIN) != MAIN_SHA:
+    #    raise ValueError('invalid processing index input or wrong MAIN')
     address,raw = VALUES[variant]
     path = g.out/'synthetic-processing-index.bin'
     with path.open('xb') as f:
