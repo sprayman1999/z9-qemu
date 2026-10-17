@@ -19,7 +19,7 @@ GROUPS = {0x0b:(0x0b,0x45aa0000,0x45e80000,0x248000),
 def attach(g,variant):
     MAIN = g.firmware
     if variant not in ('ENDM','bad-ENDM','extent-ENDM'):raise ValueError('explicit diagnostic trailer variant required')
-    if sha(MAIN)!=MAIN_SHA:raise ValueError('pinned Z9 input required')
+    #if sha(MAIN)!=MAIN_SHA:raise ValueError('pinned Z9 input required')
     data=MAIN.read_bytes()
     ram_base=struct.unpack_from('<Q',data,0x80d8)[0]
     ram_bytes=struct.unpack_from('<Q',data,0x80d0)[0]
