@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 import numpy as np
 from PIL import Image
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
@@ -17,10 +18,22 @@ from service_z9_mcu import Peer
 from validate_run import MenuAcceptance
 from z9_global1_boundary_input import Peer as BoundaryPeer
 from z9_navigation_input import key_body as navigation_body, states as navigation_states
-from run import KEY_COMMANDS, KeyController, Session, make_handler
+from run import DEFAULT_CARD, EXPOSURE_COMMANDS, KEY_COMMANDS, KeyController, Session, argument_parser, decoded_contact, make_handler
+from z9_exposure_input import adjustment_states, state as exposure_state, states as exposure_states
 
 
 class InteractiveKeys(unittest.TestCase):
+    def test_default_card_is_persistent_and_can_be_overridden_or_disabled(self):
+        parser = argument_parser()
+        base = ['--firmware', '/tmp/firmware.bin']
+        args = parser.parse_args(base)
+        self.assertEqual(args.card, DEFAULT_CARD)
+        self.assertFalse(args.card_snapshot)
+        self.assertEqual(parser.parse_args(base+['--no-card']).card, None)
+        args = parser.parse_args(base+['--card', '/tmp/other.raw', '--card-snapshot'])
+        self.assertEqual(args.card, Path('/tmp/other.raw'))
+        self.assertTrue(args.card_snapshot)
+
     def peer(self):
         # Use the actual external-frame encoder without a firmware process.
         peer = Peer.__new__(Peer)
@@ -57,6 +70,7 @@ class InteractiveKeys(unittest.TestCase):
                 initial, press, release = navigation_states([action])
                 self.assertEqual(press['body_hex'], body.hex())
                 self.assertEqual(press['expected_hex'], struct.pack('<11I', sw0, sw1, *([0]*9)).hex())
+                self.assertEqual(decoded_contact(body).hex(), press['expected_hex'])
                 self.assertEqual(initial['body_hex'], release['body_hex'])
 
     def test_short_pulses_wait_for_receive_retirement_and_release_gap(self):
@@ -106,25 +120,29 @@ class InteractiveKeys(unittest.TestCase):
             self.assertIsNone(keys.next_body(now))
             self.assertFalse(keys.busy)
 
-    def request(self, session, path, *, origin='http://127.0.0.1:8789', menu_test=False):
+    def request(self, session, path, *, origin='http://127.0.0.1:8789', menu_test=False, method='POST', raw=False):
         class Socket:
             def __init__(self):self.output = bytearray()
             def makefile(self, *args):
                 headers = '' if origin is None else f'Origin: {origin}\r\n'
-                return io.BytesIO(f'POST {path} HTTP/1.0\r\n{headers}Content-Length: 0\r\n\r\n'.encode())
+                return io.BytesIO(f'{method} {path} HTTP/1.0\r\n{headers}Content-Length: 0\r\n\r\n'.encode())
             def sendall(self, data):self.output.extend(data)
         sock = Socket()
         make_handler(session, 8789, menu_test=menu_test)(sock, ('127.0.0.1', 12345), SimpleNamespace())
-        return int(sock.output.split(b' ', 2)[1])
+        return bytes(sock.output) if raw else int(sock.output.split(b' ', 2)[1])
 
     def test_http_commands_queue_in_order_and_reject_invalid_requests(self):
-        session = Session()
+        session = Session();session.status['ready'] = True
         commands = ['menu', 'up', 'down', 'left', 'right', 'ok', 'half-down', 'half-up',
-                    'playback', 'release-mode', 'zoom', 'thumbnail', 'drive-single', 'drive-cl', 'drive-ch']
+                    'playback', 'release-mode', 'zoom', 'thumbnail', 'drive-single', 'drive-cl', 'drive-ch',
+                    'iso-down', 'iso-up', 'shutter-slower', 'shutter-faster', 'mode-previous', 'mode-next']
         self.assertEqual(set(commands), KEY_COMMANDS)
+        received = []
         for command in commands:
+            if session.commands.full():received.append(session.commands.get_nowait())
             self.assertEqual(self.request(session, '/key/'+command), 204)
-        self.assertEqual([session.commands.get_nowait() for _ in commands], commands)
+        while not session.commands.empty():received.append(session.commands.get_nowait())
+        self.assertEqual(received, commands)
         for path in ('/key/touch', '/key/up?x=1', '/key/menu-down', '/up', '/key/up/'):
             self.assertEqual(self.request(session, path), 400)
         for origin in (None, 'https://example.com', 'http://127.0.0.1:9999'):
@@ -141,6 +159,49 @@ class InteractiveKeys(unittest.TestCase):
         self.assertEqual(self.request(session, '/key/up'), 429)
         self.assertEqual(self.send(keys, 60_000_000), key_body())
         self.assertEqual(session.commands.qsize(), 16)
+
+    def test_capture_requires_ready_single_mode_and_reserves_one_request(self):
+        session=Session()
+        self.assertEqual(self.request(session,'/capture'),409)
+        session.status.update(capture_ready=True,drive_mode='CH')
+        self.assertEqual(self.request(session,'/capture'),409)
+        session.status['drive_mode']='S'
+        self.assertEqual(self.request(session,'/capture',origin=None),403)
+        self.assertEqual(self.request(session,'/capture'),204)
+        self.assertEqual(self.request(session,'/capture'),409)
+        self.assertEqual(self.request(session,'/key/half-up'),409)
+        self.assertEqual(session.commands.get_nowait(),'capture')
+        self.assertTrue(session.capture_pending)
+
+    def test_photo_download_serves_only_exported_files_with_exact_bytes(self):
+        session=Session()
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'DSC_0001.NEF';body=b'II*\0'+bytes(range(255))
+            path.write_bytes(body);session.status['photos']=[dict(cache=str(path))]
+            response=self.request(session,'/photo/0',method='GET',raw=True)
+            headers,payload=response.split(b'\r\n\r\n',1)
+            self.assertIn(b'200 OK',headers)
+            self.assertIn(b"attachment; filename*=UTF-8''DSC_0001.NEF",headers)
+            self.assertEqual(payload,body)
+            for route in ['/photo/1','/photo/-1','/photo/../../etc/passwd','/photo/'+'1'*5000]:
+                self.assertEqual(self.request(session,route,method='GET'),404)
+
+    def test_full_queue_does_not_reserve_a_failed_capture_request(self):
+        session=Session();session.status.update(capture_ready=True,drive_mode='S')
+        for _ in range(16):session.commands.put_nowait('up')
+        self.assertEqual(self.request(session,'/capture'),429)
+        self.assertFalse(session.capture_pending)
+        session.commands.get_nowait()
+        self.assertEqual(self.request(session,'/capture'),204)
+
+    def test_manual_inputs_wait_for_raw_preparation_and_capture_recovery(self):
+        session=Session();session.status['manual_ready']=False
+        self.assertEqual(self.request(session,'/key/menu'),409)
+        session.status.update(manual_ready=True,capture_busy=True)
+        self.assertEqual(self.request(session,'/key/half-up'),409)
+        session.status['capture_busy']=False
+        self.assertEqual(self.request(session,'/key/half-up'),204)
+        self.assertEqual(session.commands.get_nowait(),'half-up')
 
     def test_stopped_and_automatic_test_sessions_reject_manual_input(self):
         session = Session()
@@ -182,6 +243,145 @@ class InteractiveKeys(unittest.TestCase):
         self.assertIsNone(keys.next_body(0))
         after = self.send(keys, 400_000_000)
         self.assertEqual((after[7], after[0x11]), (0, 1))
+
+    def test_exposure_contacts_preserve_drive_and_release_modifier_and_delta(self):
+        for command, (control, direction) in EXPOSURE_COMMANDS.items():
+            with self.subTest(command=command):
+                keys = KeyController(self.peer());keys.release_mode = 2
+                keys.start(command)
+                now = 0
+                bodies = []
+                for _ in range(24):
+                    body = keys.next_body(now)
+                    if body is not None:
+                        bodies.append(body)
+                        keys.peer.enqueue_external(body, 2)
+                        _, _, frame = keys.peer.pending.pop(0)
+                        self.assertEqual(sum(frame) & 255, 255)
+                    if not keys.busy:break
+                    now += 2_000_000_000
+                self.assertFalse(keys.busy)
+                self.assertTrue(keys.half)
+                self.assertTrue(all(body[0x11] == 2 for body in bodies))
+                dial_bodies = [body for body in bodies if body[0xb] or body[0xc]]
+                self.assertEqual(len(dial_bodies), 1)
+                dial = dial_bodies[0]
+                self.assertFalse(dial[7])
+                self.assertEqual(dial[0xb], direction & 255)
+                self.assertEqual(dial[0xc], 0)
+                self.assertEqual((dial[0x16], dial[0xe]), (int(control == 'iso'), int(control == 'mode')))
+                self.assertEqual((bodies[-1][0xb], bodies[-1][0x16], bodies[-1][0xe]), (0, 0, 0))
+                if control != 'shutter':
+                    self.assertEqual((bodies[0][7], bodies[0][0xb]), (0, 0))
+                    self.assertEqual((bodies[1][0x16], bodies[1][0xe]), (dial[0x16], dial[0xe]))
+                    self.assertTrue(all(not body[7] for body in bodies[:-1]))
+                    self.assertEqual((bodies[3][0xb], bodies[3][0x16], bodies[3][0xe]),
+                                     (0, dial[0x16], dial[0xe]))
+                    self.assertFalse(bodies[-1][0x16] or bodies[-1][0xe])
+                    self.assertEqual((bodies[-3][0x16], bodies[-3][0xe], bodies[-3][0xb]),
+                                     (dial[0x16], dial[0xe], 0))
+                else:
+                    self.assertTrue(all(not body[7] for body in bodies[:-1]))
+                self.assertEqual(bodies[-1][7], 1)
+
+    def test_iso_release_survives_full_queue_and_receive_retirement(self):
+        session = Session();session.status['ready'] = True
+        keys = KeyController(self.peer())
+        keys.start('iso-up')
+        self.assertEqual(self.send(keys, 0), key_body())
+        self.assertIsNone(keys.next_body(0))
+        self.assertEqual(self.send(keys, 500_000_000)[0x16], 1)
+        keys.peer.rx_retiring = True
+        self.assertIsNone(keys.next_body(1_000_000_000))
+        keys.peer.rx_retiring = False
+        self.assertIsNone(keys.next_body(1_000_000_000))
+        dial = self.send(keys, 1_500_000_000)
+        self.assertEqual((dial[0x16], dial[0xb]), (1, 1))
+        self.assertIsNone(keys.next_body(1_500_000_000))
+        for _ in range(16):self.assertEqual(self.request(session, '/key/iso-down'), 204)
+        self.assertEqual(self.request(session, '/key/iso-down'), 429)
+        stopped_dial = self.send(keys, 2_000_000_000)
+        self.assertEqual((stopped_dial[0x16], stopped_dial[0xb]), (1, 0))
+        self.assertIsNone(keys.next_body(2_000_000_000))
+        self.assertEqual(self.send(keys, 2_500_000_000), key_body())
+        self.assertIsNone(keys.next_body(2_500_000_000))
+        finish = self.send(keys, 4_500_000_000)
+        self.assertEqual((finish[0x16], finish[0xb]), (1, 0))
+        self.assertIsNone(keys.next_body(4_500_000_000))
+        self.assertEqual(self.send(keys, 5_000_000_000), key_body())
+        self.assertIsNone(keys.next_body(5_000_000_000))
+        self.assertEqual(self.send(keys, 7_000_000_000), key_body(half=True))
+        self.assertIsNone(keys.next_body(7_000_000_000))
+        self.assertIsNone(keys.next_body(9_000_000_000))
+        self.assertFalse(keys.busy)
+        self.assertTrue(keys.half)
+        self.assertEqual(session.commands.qsize(), 16)
+
+    def test_exposure_decoder_contract_and_existing_capture_inputs(self):
+        row = exposure_state('iso', iso=True, dial=-1)
+        self.assertEqual(decoded_contact(bytes.fromhex(row['body_hex'])), bytes.fromhex(row['expected_hex']))
+        self.assertEqual(struct.unpack('<11I', bytes.fromhex(row['expected_hex'])),
+                         (0x200, 0x20000000, 0, 0, 0xffffffff, 0, 0, 0, 0, 0, 0))
+        self.assertEqual(len(exposure_states(mode_steps=1, shutter_steps=-1)), 5)
+        for control, direction in (('iso', 0), ('iso', True), ('iso', 2), ('unknown', 1)):
+            with self.assertRaises(ValueError):adjustment_states(control, direction)
+
+    def test_exposure_waits_for_initial_live_view(self):
+        session = Session()
+        for command in EXPOSURE_COMMANDS:
+            self.assertEqual(self.request(session, '/key/'+command), 409)
+        self.assertTrue(session.commands.empty())
+        session.status['ready'] = True
+        self.assertEqual(self.request(session, '/key/iso-up'), 204)
+
+    def test_shutter_releases_half_before_turning(self):
+        keys = KeyController(self.peer())
+        keys.start('shutter-slower')
+        self.assertEqual(self.send(keys, 0), key_body())
+        self.assertIsNone(keys.next_body(0))
+        dial = self.send(keys, 500_000_000)
+        self.assertEqual((dial[7], dial[0xb]), (0, 255))
+        self.assertIsNone(keys.next_body(500_000_000))
+        self.assertEqual(self.send(keys, 1_000_000_000), key_body())
+
+    def test_exposure_wakes_a_released_camera_before_using_the_dial(self):
+        keys = KeyController(self.peer());keys.half = False
+        keys.start('iso-up')
+        self.assertEqual(self.send(keys, 0), key_body(half=True))
+        self.assertIsNone(keys.next_body(0))
+        self.assertEqual(self.send(keys, 500_000_000), key_body())
+        self.assertIsNone(keys.next_body(500_000_000))
+        iso = self.send(keys, 1_000_000_000)
+        self.assertEqual((iso[7], iso[0x16], iso[0xb]), (0, 1, 0))
+
+    def test_next_contact_waits_for_original_keyscan_after_rx_retirement(self):
+        observed = [decoded_contact(key_body())]
+        keys = KeyController(self.peer(), native_state=lambda:observed[0])
+        keys.start('shutter-slower')
+        self.assertEqual(self.send(keys, 0), key_body())
+        self.assertIsNone(keys.next_body(0))
+        dial = self.send(keys, 500_000_000)
+        self.assertIsNone(keys.next_body(1_000_000_000))
+        self.assertEqual(len(keys.consumed), 1)
+        observed[0] = decoded_contact(dial)
+        self.assertIsNone(keys.next_body(2_000_000_000))
+        self.assertIsNone(keys.next_body(2_499_999_999))
+        self.assertEqual(self.send(keys, 2_500_000_000), key_body())
+        self.assertEqual(keys.consumed[-1]['decoded_hex'], observed[0].hex())
+
+    def test_missing_original_keyscan_is_a_bounded_failure(self):
+        keys = KeyController(self.peer(), native_state=lambda:decoded_contact(key_body()))
+        keys.half = False;keys.start('iso-up');self.send(keys, 0)
+        self.assertIsNone(keys.next_body(1_000_000_000))
+        with self.assertRaisesRegex(TimeoutError, 'key-scan'):
+            keys.next_body(11_000_000_001)
+
+    def test_stalled_transport_has_a_host_bound_even_without_virtual_progress(self):
+        keys = KeyController(self.peer());keys.start('iso-up');self.send(keys, 0)
+        keys.peer.rx_retiring = True
+        with patch('run.time.monotonic', return_value=keys.sent_at+61):
+            with self.assertRaisesRegex(TimeoutError, 'host transport'):
+                keys.next_body(0)
 
 class BoundaryClockTests(unittest.TestCase):
     def test_pause_dropped_periods_and_record_cap_do_not_change_delivery(self):

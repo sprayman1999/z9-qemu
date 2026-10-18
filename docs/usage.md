@@ -1,6 +1,6 @@
 # Running and controls
 
-Generate input with `python tools/make_cmos.py`, then run:
+Run with the default full-resolution 14-bit input (generated on first launch):
 
 ```sh
 python tools/run.py --firmware /path/to/main.bin \
@@ -10,12 +10,49 @@ python tools/run.py --firmware /path/to/main.bin \
 The output directory must be new. Keep it local. The default is a timestamped
 directory beneath `.local/`. Open `http://127.0.0.1:8789/`.
 
-The controller starts with half-shutter held to keep the active capture path
+With a persistent card and full-resolution input, the browser prepares the
+verified lossless14 RAW configuration in the original camera menu, then enables
+**📷 拍照**. Each click runs one full shutter press/release, native processing,
+write-card completion and live-view/menu recovery in the same guest. ISO and
+shutter adjustments made after preparation stay in that guest. Select **S**
+single drive mode first. Manual controls wait while preparation or a photo is
+in progress. Up to eight released single photos are allowed per session;
+continuous burst is not enabled by this button.
+
+Success requires a new, fully initialized NEF/JPEG entry on the actual card,
+not just an input acknowledgement or a changed frame. After recovery, the
+runner pauses the guest, reads the card without modifying it, and exports
+the newly saved files to `OUTPUT/photos/shot-N/`. The page then shows download
+links. It never assembles a substitute camera file. `POST /capture` reserves
+one ordered request and rejects unavailable/busy/non-S sessions with 409;
+`GET /photo/N` downloads only files exported by this session. A missing new
+file or interrupted capture is an error, not a saved photo.
+
+The default sensor file is `.local/z9-14bit.raw`, generated as authored
+8280×5520 color bars when absent. To use a scene image, generate the full input
+before launch:
+
+```sh
+python tools/make_cmos.py --width 8280 --height 5520 --bits 14 \
+    --image /path/to/scene.jpg --output .local/z9-14bit.raw
+```
+
+`--preview-only`, `--no-card`, `--card-snapshot`, `--headless` and `--menu-test`
+retain the preview workflow. Explicit small/12-bit `--raw` inputs also run
+preview only; the photo button stays disabled. A full input may use either
+8256×5504 or 8280×5520 14-bit RGGB, with an exact NZ9RAW1 file length. Initial
+preparation and full photo processing can take minutes. A 600 s host bound
+detects a stalled preparation/photo; original firmware timers are unchanged.
+
+The preview-only controller starts with half-shutter held to keep the active capture path
 running. MENU releases half-shutter and sends one MENU press/release pair.
 The current firmware path can consume a first press without opening a menu;
 if the shooting overlay remains, wait before pressing MENU again. Half shutter
 hold returns from menus through the original firmware's key path. Release
-releases half-shutter. All inputs are synthetic MCU messages; they do not
+releases half-shutter. This is not a full shutter press: it does not request a
+photo or create a photo cache. Use the separate **📷 拍照** button, or the
+standalone [full RAW capture workflow](capture.md). Both use the complete
+sensor, processing, shutter GPIO and write-card models. All inputs are synthetic MCU messages; they do not
 alter application state directly.
 
 Use the direction pad to navigate and OK to confirm. Keyboard shortcuts are
@@ -49,8 +86,67 @@ The input selection does not claim continuous shooting acceptance.
 The additional POST routes are `/key/playback`, `/key/thumbnail`, `/key/zoom`,
 `/key/release-mode`, `/key/drive-single`, `/key/drive-cl` and `/key/drive-ch`.
 
-To let the original firmware read existing photographs, supply an actual
-raw virtual card from a completed capture run:
+The **Exposure / 曝光参数** controls become available after the first verified
+live-view frames. Exposure POSTs before initial readiness return 409. Use them
+in the shooting view:
+
+- **ISO − / ISO +** hold the original ISO key and turn the main dial one detent.
+- **Slower / Faster** turn the main dial one detent. Select S or M with
+  **Mode ◀ / Mode ▶** first; the native firmware determines the dial's meaning
+  in P/A and custom control configurations.
+- **Mode ◀ / Mode ▶** hold MODE and turn the main dial to cycle exposure modes.
+
+Read the selected values from the original LCD. Auto ISO remains under camera
+control: changing the selected ISO does not disable Auto ISO or fix its actual
+metered sensitivity. Use the original camera menu to disable Auto ISO when a
+fixed ISO is needed. The controller does not render or assume numeric values.
+
+Each modifier press lasts 500 ms, followed by a signed dial input for 500 ms,
+a separate 500 ms zero-dial state with the modifier still pressed, and a released
+modifier state for 2 s, timed after MCU receive retirement. ISO/MODE operations
+finish with another 500 ms press and 2 s release of the same button. This uses
+the documented [f6 exit action](https://onlinemanual.nikonimglib.com/z9/en/15_menu_guide_04_f06.html)
+to end a retained parameter selection before a later dial action. Shutter
+operations use a 500 ms dial input and 2 s zero-dial state. A held half-shutter
+is released before any exposure action; if it was released, a 500 ms half-press
+wakes the camera first. Every exposure action finishes with half-shutter held
+for at least 2 s and leaves it held to keep the preview active. **Release**
+releases it. All
+contacts retain the selected S/CL/CH drive position. Pending modifier releases
+and finishing contacts remain internal even when the HTTP queue is full.
+
+The worker waits for both MCU RX retirement and the original key-scan task's
+decoded contact state before starting each hold/gap. It reads the 44-byte state
+at `0xa03222034`, copied by the original task at `0x40d28f30` after rotary-count
+accumulation at `0x40d28f20`. This prevents a following zero-dial frame from
+overtaking the native key scan. These reads only observe firmware RAM. A missing
+match fails after 10 s of guest virtual time instead of reporting a completed
+input. A 60 s host transport bound also catches a stalled virtual clock or RX.
+These are controller diagnostics; original firmware deadlines are unchanged.
+Consumed states are retained in the local run's `interactive_key_consumers`.
+
+Native M-mode ISO selection and shutter setting transactions have been checked.
+The LCD's small numeric regions can retain an older value after a setting
+transaction; immediate repaint is not guaranteed by the current display model.
+No host numeric overlay replaces those fields. See [validation status](testing.md).
+
+The routes are `/key/iso-down`, `/key/iso-up`, `/key/shutter-slower`,
+`/key/shutter-faster`, `/key/mode-previous` and `/key/mode-next`. On the pinned
+default controls, ISO up and faster shutter use signed main-dial delta +1;
+ISO down and slower shutter use −1. MODE uses −1 / +1 for previous / next.
+The original decoder at `0x41024e90` maps ISO body byte `0x16` to SW1
+`0x20000000`, MODE byte `0x0e` to SW0 `0x800`, and signed main dial byte
+`0x0b` to decoded word 4. The original `ID_SW1_ISO` name table corroborates
+the ISO mask. These are external input records; settings RAM is not edited.
+
+Every normal `tools/run.py` launch attaches
+`.local/cards/playback-card.raw` beneath the repository root. Guest writes
+persist to this regular image across runs. The image must already exist;
+the runner never creates or formats it, and a missing default fails with an
+actionable error. Use `--no-card` explicitly for card-free experiments.
+
+To select another card, supply an actual raw virtual card, for example from
+a completed capture run:
 
 ```sh
 python tools/run.py --firmware /path/to/main.bin \
@@ -58,10 +154,13 @@ python tools/run.py --firmware /path/to/main.bin \
 ```
 
 The file must be a regular `.raw` disk image with an MBR exFAT partition.
-It is attached to the modeled NVMe controller before boot. QEMU uses a
-temporary snapshot for metadata writes; the supplied backing card is opened
-read-only and changes are discarded on exit. The default without `--card`
-still has no card. Native file reading, JPEG decoding and the resulting LCD
+It is attached to the modeled NVMe controller before boot with
+`snapshot=off`. Add `--card-snapshot` to use a temporary overlay and discard
+all this run's card writes on exit. The status reports `card_path` and
+`card_persistent` so the selected image and write policy are visible. The
+launcher selects the full capture profile only with a valid full input and
+persistent card; releasing half-shutter still cannot create a photograph. Native file reading,
+JPEG decoding and the resulting LCD
 must be checked in a firmware-dependent run; successful key delivery alone
 does not establish working photograph playback.
 
@@ -124,7 +223,9 @@ selected dimensions. This is a test fixture, not a physical sensor protocol.
 
 For shutter release, a full NEF on a virtual card, fresh post-shot live view
 and two post-shot menu returns, use the separate [capture workflow](capture.md).
-The browser preview profile attaches a card only with `--card` and does not expose full shutter/REC.
+The preview-only profile omits the full shutter/REC processing graph. Normal
+browser sessions attach the default card and enable single-photo capture when
+the full-resolution input and RAW preparation are ready; REC remains separate.
 The capture profile uses full-size 8256×5504/14-bit host input (or 8280×5520), opt-in image/storage
 models and a request-bound CCOMP MCU/GPIO peer. Do not combine it with another
 running preview process or count LCD video as a movie recording.

@@ -11,17 +11,21 @@ from pathlib import Path
 import struct
 
 
-def catalog(path):
+def catalog(path, *, offset=0, length=None):
     path=Path(path)
     if not path.is_file():raise ValueError('regular extracted volume file required')
-    size=path.stat().st_size;rows=[];visited=set()
+    available=path.stat().st_size
+    size=available-offset if length is None else length
+    if offset<0 or size<512 or offset+size>available:raise ValueError('invalid volume bounds')
+    rows=[];visited=set()
     with path.open('rb') as stream:
         def read(offset,length):
             if offset<0 or length<0 or offset+length>size or length>16*1024*1024:
                 raise ValueError('out-of-range volume read')
-            stream.seek(offset);data=stream.read(length)
+            stream.seek(volume_offset+offset);data=stream.read(length)
             if len(data)!=length:raise ValueError('short volume read')
             return data
+        volume_offset=offset
         boot=read(0,512)
         if boot[3:11]!=b'EXFAT   ' or not 9<=boot[108]<=12 or boot[109]>16:
             raise ValueError('unsupported exFAT geometry')

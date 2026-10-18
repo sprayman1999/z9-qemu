@@ -13,12 +13,13 @@ import struct
 from inspect_virtual_exfat import catalog
 
 
-def extract(volume, name, output):
+def extract(volume, name, output, *, offset=0, length=None):
     volume, output = Path(volume), Path(output)
-    rows = [x for x in catalog(volume)['files'] if x['path'] == name and not x['directory']]
+    rows = [x for x in catalog(volume, offset=offset, length=length)['files'] if x['path'] == name and not x['directory']]
     if len(rows) != 1:
         raise ValueError('One exact, validated file entry required')
     row = rows[0]
+    volume_size = volume.stat().st_size-offset if length is None else length
     length = row['bytes']
     if not 0 < length <= 256*1024*1024 or row['valid_bytes'] != length:
         raise ValueError('Bounded, fully initialized file required')
@@ -26,7 +27,8 @@ def extract(volume, name, output):
         raise ValueError('Fresh output in an existing private directory required')
     digest = hashlib.sha256()
     with volume.open('rb') as src, output.open('xb') as dst:
-        boot = src.read(512)
+        volume_offset=offset
+        src.seek(volume_offset);boot = src.read(512)
         sector = 1 << boot[108]
         cluster = sector << boot[109]
         fat, _, heap, count, _ = struct.unpack_from('<IIIII', boot, 80)
@@ -39,9 +41,9 @@ def extract(volume, name, output):
             seen.add(current)
             offset = heap*sector+(current-2)*cluster
             size = min(left, cluster)
-            if offset+size > volume.stat().st_size:
+            if offset+size > volume_size:
                 raise ValueError('Actual file span exceeds the volume')
-            src.seek(offset)
+            src.seek(volume_offset+offset)
             data = src.read(size)
             if len(data) != size:
                 raise ValueError('Short actual file read')
@@ -52,7 +54,7 @@ def extract(volume, name, output):
                 if row['contiguous']:
                     current += 1
                 else:
-                    src.seek(fat*sector+current*4)
+                    src.seek(volume_offset+fat*sector+current*4)
                     value = src.read(4)
                     if len(value) != 4:
                         raise ValueError('Short FAT read')
@@ -62,7 +64,8 @@ def extract(volume, name, output):
     result = dict(volume=str(volume), entry=row, output=str(output), bytes=length,
                   sha256=digest.hexdigest(), camera_image_decoded=False,
                   scope='actual initialized file bytes extracted read-only; no substituted data, codec or camera-file acceptance')
-    output.with_suffix(output.suffix+'.extraction.json').open('x').write(json.dumps(result, indent=2)+'\n')
+    with output.with_suffix(output.suffix+'.extraction.json').open('x') as receipt:
+        receipt.write(json.dumps(result, indent=2)+'\n')
     return result
 
 

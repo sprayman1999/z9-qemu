@@ -18,7 +18,22 @@ from capture_support import HERE,PUBLIC,validate,archive
 CONSUMER=0x40d2939c
 
 
-def main():
+def interactive(a):
+    """Reuse the native capture profile in the browser's existing guest."""
+    from capture_support import full_sensor
+    full_sensor(a.raw)
+    profile=json.loads((HERE/'capture-lossless14-profile.json').read_text())
+    argv=['--name','z9-interactive','--firmware',str(a.firmware),'--raw',str(a.raw),
+          '--output',str(a.output)]
+    if a.qemu is not None:argv+=['--qemu',str(a.qemu)]
+    for key,value in dict(profile['arguments'],seconds=a.seconds,capture_count=8).items():
+        flag='--'+key.replace('_','-')
+        if value is True:argv.append(flag)
+        elif value is not False and value is not None:argv += [flag,str(value)]
+    return main(argv,web=a)
+
+
+def main(argv=None, *, web=None):
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--name',required=True);ap.add_argument('--seconds',type=int,default=120)
     ap.add_argument('--fast-capture',action='store_true',
@@ -134,7 +149,7 @@ def main():
     ap.add_argument('--raw',type=Path,required=True)
     ap.add_argument('--qemu',type=Path)
     ap.add_argument('--output',type=Path,required=True)
-    args=ap.parse_args();args.lifecycle_observer=None;manifest=validate(args.qemu)
+    args=ap.parse_args(argv);args.lifecycle_observer=None;manifest=validate(args.qemu)
     from z9_navigation_input import parse_actions
     try:menu_actions=parse_actions(args.menu_actions)
     except ValueError as error:ap.error(str(error))
@@ -166,7 +181,7 @@ def main():
     if args.raw_lossless14 and not args.engine1540_frame_pass:ap.error('F0 lossless14 requires actual RAW request/producer ownership')
     if args.trace_engine15e2_input and not args.engine15e2_jpeg:ap.error('JPEG input observer requires JPEG model')
     if not args.name.startswith('z9-') or not args.name.replace('-','').isalnum():ap.error('fresh z9- name required')
-    if not 15<=args.seconds<=600:ap.error('bounded 15..600 seconds required')
+    if web is None and not 15<=args.seconds<=600:ap.error('bounded 15..600 seconds required')
     if not 1<=args.settle_seconds<=120:ap.error('bounded 1..120 virtual settle seconds required')
     if args.capture_gpio and (not args.trace_app_keys or args.sequence!='shutter'):
         ap.error('capture GPIO diagnostic requires shutter sequence and native observations')
@@ -208,8 +223,8 @@ def main():
     from private_bounded_qmp import QMP
     guest_transport.QMP=QMP
     class CaptureGuest(runner.PreparedGuest):
-        def __init__(self,*a):
-            super().__init__(*a);archive(self,manifest)
+        def __init__(self,*a,**kw):
+            super().__init__(*a,**kw);archive(self,manifest)
             self.data['probe_arguments']={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()}
             if args.secondary_source_timing:
                 self.command[self.command.index('-M')+1]+=',event1508-secondary-timing-model=on'
@@ -302,7 +317,7 @@ def main():
                 self.command[self.command.index('-M')+1]+=',engine1542-ram-input-control-model=on'
             if args.capture_thumbnail_nv16:
                 self.command[self.command.index('-M')+1]+=',capture-thumbnail-nv16-model=on'
-            if args.nvme_card:
+            if args.nvme_card and web is None:
                 from virtual_recording_card import create
                 card=self.out/'capture-card.raw'
                 self.data['private_virtual_card']=create(card,'exfat')
@@ -511,13 +526,23 @@ def main():
                 from capture_recovery_flow import recovery_states
                 self.states+=recovery_states()
             self.recovery_observer=None
+            self.browser_idle=web is not None
+            self.browser_prepared=False
+            self.browser_before={}
+            self.browser_photos=[]
+            self.browser_started=time.monotonic()
+            if web is not None:
+                # Startup selects the same verified RAW format/compression,
+                # then waits for the operator instead of pressing the shutter.
+                self.states=self.states[:self.preparation_prefix]
             self.interactive_actions=[];self.interactive_finished=False;self.interactive_ready_at=None
             self.index=0;self.active=None;self.next_probe=0;self.next_virtual=None
             self.capture=dict(sequence=args.sequence,start_at=args.start_at,settle_seconds=args.settle_seconds,
                 half_press_seconds=args.half_press_seconds,
                 inputs=[],all_inputs_consumed=False,
                 capture_complete=False,file_saved=False,video_mode_verified=False,
-                scope=('native key consumer and return with fresh host-formatted virtual card' if args.nvme_card
+                scope=('native browser shutter/processing/recovery with existing persistent virtual card' if web is not None else
+                       'native key consumer and return with fresh host-formatted virtual card' if args.nvme_card
                     else 'native key consumer and return only; no card attached'))
             self.g.data['capture_sequence']=self.capture
             self.capture_cycle=1
@@ -1210,6 +1235,43 @@ def main():
                     if self.index==len(self.states):self.capture['all_inputs_consumed']=True
             return handled
 
+        def browser_status(self):
+            if web is None:return {}
+            if (not self.browser_prepared or not self.browser_idle) and time.monotonic()-self.browser_started>600:
+                raise TimeoutError('Native photo preparation/capture exceeded the 600 second host bound')
+            return dict(capture_supported=True,capture_busy=not self.browser_idle,
+                manual_ready=self.browser_prepared and self.browser_idle,
+                capture_ready=self.browser_prepared and self.browser_idle and self.capture_cycle<=8,
+                capture_phase=('Preparing RAW capture' if not self.browser_prepared else
+                               'Ready' if self.browser_idle else 'Capturing and recovering'),
+                photos=list(self.browser_photos),capture_limit=8)
+
+        def request_capture(self):
+            if not self.browser_status().get('capture_ready'):
+                raise RuntimeError('Native capture is not ready')
+            from capture_support import card_photos
+            from capture_recovery_flow import recovery_states
+            from capture_repeat_flow import recovery
+            self.g.qmp.command('stop');self.handle()
+            self.browser_before=card_photos(web.card)[0]
+            self.preparation_prefix=len(self.states)
+            self.states += [dict(row) for row in self.contact_states]
+            self.post_capture_start=len(self.states)
+            self.states += recovery_states()
+            self.capture['post_capture_recovery']=recovery(self.post_capture_start)
+            self.capture_baseline=None
+            self.capture['all_inputs_consumed']=False
+            self.capture['capture_complete']=False;self.capture['file_saved']=False
+            self.browser_idle=False
+            self.browser_started=time.monotonic()
+            self.next_virtual=runner.state(self.g,'runtime-clock-state')['virtual_ns']+500000000
+            self.g.qmp.command('cont')
+
+        def manual_contact(self,body):
+            # The original still backend also consumes the two shutter GPIOs.
+            self.g.qmp.command('qom-set',path='/machine',property='capture-gpio-input',
+                value=str(body[7]|(body[8]<<1)))
+
         def clock_if_ready(self,channels):
             if super().clock_if_ready(channels):return True
             now=time.monotonic()
@@ -1217,6 +1279,13 @@ def main():
             self.next_probe=now+.25
             if self.index==len(self.states):
                 virtual=runner.state(self.g,'runtime-clock-state')['virtual_ns']
+                if web is not None and self.browser_idle:
+                    latest=self.g.data.get('latest_pipeline',{})
+                    lcd=latest.get('lcd',{})
+                    if (virtual>=self.next_virtual and lcd.get('last_frame_has_video') and
+                            lcd.get('video_frames',0)>=8):
+                        self.browser_prepared=True
+                    return False
                 if args.navigation_file and not self.interactive_finished:
                     if virtual<self.next_virtual+2000000000:return False
                     if self.interactive_ready_at!=self.index:
@@ -1281,6 +1350,24 @@ def main():
                         raw_frames=raw['frames'],released_raw_frames=released['raw']['frames'],
                         lcd_video_frames=lcd['video_frames'],virtual_ns=virtual)
                     if ready:
+                        if web is not None:
+                            from capture_repeat_flow import completed
+                            from capture_support import export_new_photos
+                            self.g.qmp.command('stop');self.handle()
+                            final=self.snapshot('capture-cycle-'+str(self.capture_cycle)+'-recovered')
+                            self.capture['repeated_capture']['completed'].append(completed(
+                                self.capture_cycle,self.capture_baseline,recovery,final,self.index))
+                            photos=export_new_photos(web.card,self.browser_before,
+                                self.g.out/'photos'/('shot-'+str(self.capture_cycle)))
+                            self.browser_photos.extend(photos)
+                            self.capture.setdefault('saved_photos',[]).extend(photos)
+                            self.capture['capture_complete']=True;self.capture['file_saved']=True
+                            self.capture_cycle+=1
+                            self.browser_idle=True
+                            session.capture_pending=False
+                            self.g.qmp.command('cont')
+                            print('Native photograph saved: '+', '.join(p['name'] for p in photos),flush=True)
+                            return False
                         if args.capture_count > 1:
                             from capture_repeat_flow import completed, recovery as new_recovery
                             final=self.snapshot('capture-cycle-'+str(self.capture_cycle)+'-recovered')
@@ -1467,6 +1554,12 @@ def main():
     options=argparse.Namespace(firmware=args.firmware,qemu=Path(manifest['binary']),
         raw=args.raw,output=output,seconds=args.seconds,menu_test=False)
     session=runner.Session()
+    if web is not None:
+        session.status.update(capture_supported=True,manual_ready=False,capture_ready=False)
+        options.card=web.card;options.card_snapshot=False
+        options.port=web.port;options.headless=web.headless
+        (output.parent).mkdir(parents=True,exist_ok=True)
+        return runner.serve(options,session)
     if args.fast_capture:
         from fast_capture_worker import worker
         worker(options,session,runner)

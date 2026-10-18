@@ -1,5 +1,113 @@
 # Validation status
 
+## Browser single-photo capture (2026-10-18)
+
+The independent **📷 拍照** button now reuses the complete lossless14 capture
+profile in the same guest as menu, ISO and shutter controls. Startup performs
+the original RAW setup and waits for actual video before enabling controls.
+Each request runs the existing full shutter/GPIO and processing sequence,
+both native post-shot menu returns and fresh-frame gates. Only a new,
+initialized photo entry read from the actual persistent card is exported and
+reported saved. Half-up remains a separate release-only contact.
+
+The browser took two released single photos in one C5.32 guest and the default
+`playback-card.raw`; an ISO-up command ran between them. The bounded run ended
+normally with 4,391 passing protocol checks, 72 automatic contacts, nine manual
+contacts, two completed recovery cycles, no recorded error and the owned QEMU
+stopped. The card retained both files after shutdown, and read-only extraction
+from the stopped backing image matched each session export exactly:
+
+| Native card file | Bytes | SHA-256 |
+| --- | --- | --- |
+| `DCIM/100NCZ_9/DSC_0001.NEF` | 35,109,505 | `362fe89dcfb5843f806428f22d1d242c6a591abb1f5ab920e43f2adfbeb1ab45` |
+| `DCIM/100NCZ_9/DSC_0002.NEF` | 35,109,505 | `3016e21f8f0ccf0f376f66a05d2e2f6257dc12cd51ad97e05a00eeddada392d5` |
+
+Independent rawpy 0.27.1/LibRaw decoding produced 8280×5520 samples per file.
+All 91,411,200 samples matched the respective original acknowledged packed
+RAW producer buffers. Each embedded 8256×5504, 1620×1080 and 160×120 JPEG
+decoded with Pillow. These are decode/sample comparisons, not a new MakerNote
+codec-profile audit; ExifTool was unavailable for that separate check. The
+browser's download API returned the first file byte-for-byte with the above
+hash. The generic browser download event timed out; it is not counted as a
+passed download-event check. The final HTTP endpoint adds an explicit
+attachment filename, covered by the exact-byte response regression.
+
+All 51 firmware-free Python checks passed, including readiness/busy/S-mode
+admission, duplicate-click reservation, bounded queue failure, original half-up
+semantics, partition-offset extraction, refusal to reuse an old photo and
+download byte/filename restrictions. Browser-script syntax was also checked.
+No QEMU C code, guest instructions or application setting RAM were changed.
+The UI limit is eight photos per session; this update's native acceptance is
+two sequential single photos. Burst, movie capture, arbitrary quality changes
+and saved-photo LCD playback retain their separate verification limits.
+
+## Default persistent preview card (2026-10-18)
+
+`tools/run.py` now defaults to `.local/cards/playback-card.raw` and uses
+`snapshot=off`, preserving guest writes across launches. `--card` selects
+another existing image, `--no-card` explicitly omits storage, and
+`--card-snapshot` restores the earlier ephemeral behavior. The image is never
+created or formatted by the launcher. Its resolved path and persistence policy
+are displayed in the browser.
+
+All 45 firmware-free Python checks passed, including default/override/no-card
+argument handling and persistent versus ephemeral NVMe attachment. A bounded
+native boot recorded 679 passing protocol checks, no error and a stopped owned
+QEMU, with the expected 8 GiB card and `temporary_snapshot=false`. A subsequent
+browser check verified the actual default card status, a complete half-release
+and re-press, original PHOTO menu entry and half-shutter return to fresh video.
+That run ended with 1,529 passing protocol checks, six consumed key contacts,
+1,952 RAW frames and 1,356 LCD video frames, no error and the owned QEMU stopped.
+The short first boot's lack of video before its deadline is not counted as
+live-view acceptance. Browser-script syntax and publication hashes were checked.
+
+The old **Release** button is now **Release half / 松开半按**. It sends only
+the existing half-up contact; no full press, capture processing or photo-cache
+export is implied. The standalone [full RAW workflow](capture.md) remains the
+supported complete capture/write-card path. This update does not establish
+browser photo capture at that earlier stage, saved-photo playback or physical card behavior.
+
+## ISO and shutter controls (2026-10-18)
+
+The browser now supplies ISO +/−, shutter faster/slower and MODE dial inputs.
+The original C5.32 key task was observed consuming the decoded contact states,
+in addition to the existing MCU frame/ACK checks. The bounded local run ended
+with all 6,232 recorded protocol checks passing, 92 of 92 external key contacts
+observed by the native key scan, no recorded error and the owned QEMU stopped.
+The local QA proxy reloaded authored controller source between requests and
+kept per-request source hashes; read-only native call witnesses were used to
+distinguish command handling from LCD repaint. No setting RAM or instructions
+were rewritten. Temporary tracing code is excluded from the shipped controls.
+
+Original LCD observations verified A/M selection and selected ISO
+`100 -> 125 -> 100`. Auto ISO was enabled, so the shooting overlay could show
+a different metered sensitivity after selection. In M mode, signed main-dial
+counts reached the original shutter handler at `0x40d4fc28`, with its original
+permission check returning 1. Original batch transactions at `0x410dbc98`
+included:
+
+| Direction | ShutterSpeedType `0x06000305` | ShutterSpeed `0x07000301` | FineTune `0x06000307` |
+| --- | --- | --- | --- |
+| Slower | 0 | 336 | 1344 |
+| Faster | 0 | 344 | 1376 |
+| Faster | 0 | 352 | 1408 |
+
+These are native encoded values, not host-selected replacements. The original
+LCD showed shutter values including `1/26000`, `1/13000` and `1/16000` during
+the checks. Small numeric regions sometimes retained an older value after a
+later setting transaction. Immediate numeric repaint remains a display-model
+limitation; a successful input must not be inferred solely from a cached frame.
+The native runtime shutter acceptance above is M-mode scope; custom dial
+assignment and direction remain under original firmware control.
+
+The change passed 43 firmware-free Python checks and browser-script syntax
+validation. The checks cover HTTP readiness/origin/queue handling, modifier
+release even with a full queue, half-shutter wake/release order, preservation
+of the S/CL/CH selector, native key-scan acknowledgement and bounded failure
+when transport or guest progress stalls. Firmware and tested QEMU identities
+are the same as the playback section below. Native result SHA-256:
+`068d1b00898442d32d7b2ef30fc0d93a4fc903f0318e3d5ace0e96632e27cd82`.
+
 ## Native playback input update (2026-10-17)
 
 The public `tools/run.py` launcher was built locally with pinned QEMU 10.2.4

@@ -16,10 +16,62 @@ from mcu_frames import frames
 from ccomp_command_peer import reply_for
 from capture_workflow_ready import evaluate
 from virtual_recording_card import create, attach_existing
+from capture_support import card_photos, export_new_photos, full_sensor
+from inspect_virtual_exfat import catalog
 from types import SimpleNamespace
 
 
 class CaptureContracts(unittest.TestCase):
+    def photo_card(self, directory):
+        """Tiny synthetic filesystem fixture, not a camera-photo acceptance test."""
+        path=Path(directory)/'photo-card.raw'
+        data=bytearray(14*512);base=4*512
+        data[450]=7;struct.pack_into('<II',data,454,4,10);data[510:512]=b'\x55\xaa'
+        data[base+3:base+11]=b'EXFAT   ';data[base+108]=9
+        struct.pack_into('<IIIII',data,base+80,1,1,2,8,2)
+        struct.pack_into('<I',data,base+512+8,0xffffffff)
+        group=bytearray(96);group[0]=0x85;group[1]=2;group[32]=0xc0
+        group[33]=2;group[35]=8;group[64]=0xc1
+        group[66:82]='TEST.NEF'.encode('utf-16le')
+        struct.pack_into('<Q',group,40,32);struct.pack_into('<I',group,52,3)
+        struct.pack_into('<Q',group,56,32)
+        checksum=0
+        for i,value in enumerate(group):
+            if i not in (2,3):checksum=(((checksum>>1)|((checksum&1)<<15))+value)&0xffff
+        struct.pack_into('<H',group,2,checksum)
+        data[base+1024:base+1120]=group
+        data[base+1536:base+1568]=b'II*\0'+bytes(range(28))
+        path.write_bytes(data)
+        return path
+
+    def test_extracts_only_new_initialized_photos_from_partition_offset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            card=self.photo_card(directory);before=card.read_bytes()
+            rows,offset,length=card_photos(card)
+            self.assertEqual((offset,length),(2048,5120))
+            self.assertEqual(list(rows),['TEST.NEF'])
+            exported=export_new_photos(card,{},Path(directory)/'photos'/'shot-1')
+            self.assertEqual(exported[0]['name'],'TEST.NEF')
+            self.assertEqual(Path(exported[0]['cache']).read_bytes(),before[3584:3616])
+            self.assertEqual(card.read_bytes(),before)
+            with self.assertRaisesRegex(ValueError,'no new photograph'):
+                export_new_photos(card,rows,Path(directory)/'shot-2')
+            self.assertFalse((Path(directory)/'shot-2').exists())
+            with self.assertRaises(ValueError):catalog(card,offset=2048,length=1024)
+            with self.assertRaises(ValueError):catalog(card,offset=card.stat().st_size)
+
+    def test_full_sensor_checks_header_and_exact_file_length(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'sensor.raw'
+            with path.open('wb') as stream:
+                stream.write(struct.pack('<8s6I',b'NZ9RAW1\0',8280,5520,14,0,0,16383))
+                stream.truncate(32+8280*5520*2)
+            self.assertEqual(full_sensor(path),(8280,5520))
+            with path.open('ab') as stream:stream.write(b'!')
+            with self.assertRaisesRegex(ValueError,'trailing'):full_sensor(path)
+            path.write_bytes(generate(32,16,bits=12))
+            with self.assertRaisesRegex(ValueError,'14-bit'):full_sensor(path)
+
     def playback_card(self, directory):
         path = Path(directory)/'existing-card.raw'
         mbr = bytearray(512)
@@ -65,6 +117,16 @@ class CaptureContracts(unittest.TestCase):
                     with self.assertRaises(ValueError):attach_existing(guest, path)
                     self.assertEqual(guest.command, ['qemu', '-M', 'nikon-z9-lab'])
                     self.assertEqual(guest.data, {})
+
+    def test_persistent_card_disables_ephemeral_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.playback_card(directory)
+            guest = SimpleNamespace(command=['qemu', '-M', 'nikon-z9-lab'], proc=None, data={})
+            attach_existing(guest, path, snapshot=False)
+            drive = guest.command[guest.command.index('-drive')+1]
+            self.assertIn('snapshot=off', drive)
+            self.assertFalse(guest.data['playback_card']['temporary_snapshot'])
+            self.assertFalse(guest.data['playback_card']['source_read_only'])
 
     def test_playback_cannot_attach_after_emulator_launch(self):
         with tempfile.TemporaryDirectory() as directory:

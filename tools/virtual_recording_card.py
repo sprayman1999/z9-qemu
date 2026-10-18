@@ -17,12 +17,12 @@ import struct
 import subprocess
 
 
-def attach_existing(guest, path):
+def attach_existing(guest, path, *, snapshot=True):
     """Attach a regular virtual card through PCIe before launch.
 
-    The original firmware reads and renders its own photographs. QEMU uses
-    an ephemeral overlay for filesystem metadata writes; the supplied card
-    remains the read-only backing image. No camera files are manufactured.
+    The original firmware reads and renders its own photographs. A snapshot
+    uses an ephemeral overlay; snapshot=False persists guest writes to the
+    regular image. No camera files are manufactured.
     """
     path = Path(path).resolve()
     info = path.stat()
@@ -47,11 +47,11 @@ def attach_existing(guest, path):
     guest.command[guest.command.index('-M')+1] += (
         ',pcie-link-diagnostic-mask=4,pcie-dbi-model=on,pcie-ram-dma-input=on,'
         'pcie-image-ram-dma-input=on,pcie-intx-model=on')
-    guest.command += ['-drive', f'file={path},if=none,id=card,format=raw,snapshot=on',
+    guest.command += ['-drive', f'file={path},if=none,id=card,format=raw,snapshot={"on" if snapshot else "off"}',
                       '-device', 'nvme,drive=card,serial=WL-Z9-PLAYBACK,bus=dw-pcie,addr=0']
     guest.data['playback_card'] = dict(path=str(path), bytes=info.st_size,
-        partition_offset=offset, partition_bytes=length, temporary_snapshot=True,
-        source_read_only=True, native_playback_verified=False)
+        partition_offset=offset, partition_bytes=length, temporary_snapshot=snapshot,
+        source_read_only=snapshot, native_playback_verified=False)
 
 
 
