@@ -1,6 +1,39 @@
 # Validation status
 
-## Browser single-photo capture (2026-10-18)
+## Manual interactive startup (2026-10-18)
+
+Normal `tools/run.py` startup now leaves quality, exposure and menus to the
+operator. `--auto-setup-raw` explicitly enables the older automated recipe.
+The manual handoff waits for real RAW/LCD video, then sends only one neutral
+contact to release the bootstrap half-shutter. No QUAL, dial or MENU contacts
+are generated at startup. Photo requests contain only their five shutter
+contacts; no post-photo menu/half-shutter recovery recipe runs automatically.
+
+The final manual-mode boot retained the original LCD's `NORM` selection. The
+browser then manually navigated Image quality settings to RAW, selected RAW
+recording / Lossless compression, half-pressed back to shooting, and requested
+one photo. All 3,884 protocol checks passed, with 22 user commands, 41 consumed
+manual contacts and six sequencer contacts: the one bootstrap release plus the
+five requested shutter states. The automatic quality delta was zero, automatic
+menu-action list empty, post-photo recovery disabled, no error recorded and the
+owned QEMU stopped normally. An earlier premature handoff is not counted as
+menu/photography acceptance; readiness now requires actual preview video.
+
+The native card gained `DCIM/100NCZ_9/DSC_0003.NEF` (35,109,505 bytes), SHA-256
+`2399a54c4022a87dcc54fb8925b458ff51dfb670eb9338c534c9d87b3c7608a1`.
+Read-only extraction after shutdown matched the session cache. Independent
+LibRaw decoding matched all 45,705,600 samples to the acknowledged RAW producer,
+and all three embedded JPEG previews decoded. Completion now requires new
+acknowledged RAW/JPEG work plus a stable fully initialized card entry; it does
+not require the automated menu-return acceptance gates. This verifies the
+manually selected lossless RAW path, not arbitrary image-quality formats.
+
+All 53 firmware-free Python checks passed, including default/manual versus
+explicit automatic arguments and the startup preview handoff guard. Browser
+script syntax and publication inventory/hash checks passed. Native result
+SHA-256: `93e5be66c875a4f8ae1c87c4bc90fb560e08dc9c3c8921c9d0b247a6eaabd5fc`.
+
+## Browser single-photo capture (2026-10-18, automated setup)
 
 The independent **📷 拍照** button now reuses the complete lossless14 capture
 profile in the same guest as menu, ISO and shutter controls. Startup performs

@@ -23,7 +23,7 @@
 <button data-key="down" onclick="key('down')" aria-label="Down">↓</button>
 </div>
 <p>Arrow keys: navigate · Enter: OK · M: MENU · P: playback · R: release mode · −/+: thumbnails/zoom. Each press sends one step.</p>
-<p>拍照：完成一次全按与释放，等待写卡及取景恢复后显示照片下载。请使用 S 单张模式。松开半按不会拍照。</p>
+<p>默认手动控制：请自行设置画质和曝光，当前完整拍摄已验证 RAW 无损压缩 14 位、S 单张模式。拍照完成全按与释放，写卡后提供下载；需要时自行半按返回取景。松开半按不会拍照。</p>
 </fieldset>
 <p id="card-status" role="status">正在读取存储卡状态…</p>
 <p id="input-error" role="status" aria-live="polite"></p>
@@ -63,7 +63,7 @@ async function update(){try{
     document.getElementById('status').textContent=JSON.stringify(s,null,2);
     document.getElementById('card-status').textContent=s.card_attached?'存储卡：'+s.card_path+(s.card_persistent?'（写入持久保存）':'（临时快照，退出丢弃写入）'):s.phase==='Starting'?'正在挂载存储卡…':'未挂载存储卡';
     document.getElementById('take-photo').disabled=stopped||busy||!s.capture_ready||s.drive_mode!=='S';
-    document.getElementById('capture-status').textContent=s.error?'拍照会话出错，请查看下方状态。':stopped?'会话已停止。':busy?'正在拍摄、写卡并恢复取景，请等待…':s.capture_ready?(s.drive_mode==='S'?'可以拍照；已保存 '+(s.photos||[]).length+' 个照片文件。':'请先切换到 S 单张模式。'):s.capture_supported?(s.manual_ready?'本次会话已达到拍照数量上限，请重新启动。':'正在设置 RAW 并等待取景就绪，请稍候…'):'当前为仅取景会话；拍照需要完整 14 位输入及持久存储卡。';
+    document.getElementById('capture-status').textContent=s.error?'拍照会话出错，请查看下方状态。':stopped?'会话已停止。':busy?(s.automatic_setup?'正在拍摄、写卡并恢复取景，请等待…':'正在拍摄并写卡，请等待…'):s.capture_ready?(s.drive_mode==='S'?(s.automatic_setup?'自动 RAW 设置已完成；':'手动模式：画质与曝光由你设置；')+'已保存 '+(s.photos||[]).length+' 个照片文件。':'请先切换到 S 单张模式。'):s.capture_supported?(s.manual_ready?'本次会话已达到拍照数量上限，请重新启动。':s.automatic_setup?'正在自动设置 RAW，请稍候…':'正在启动相机，不会自动设置画质…'):'当前为仅取景会话；拍照需要完整 14 位输入及持久存储卡。';
     document.getElementById('manual-controls').disabled=stopped||busy||s.manual_ready===false;
     document.getElementById('exposure-controls').disabled=!s.ready||stopped;
     const photoSignature=JSON.stringify((s.photos||[]).map(p=>p.sha256));

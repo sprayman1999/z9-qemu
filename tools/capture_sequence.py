@@ -18,22 +18,33 @@ from capture_support import HERE,PUBLIC,validate,archive
 CONSUMER=0x40d2939c
 
 
+def interactive_arguments(a):
+    """Keep hardware models; UI automation is explicitly opt-in."""
+    profile=json.loads((HERE/'capture-lossless14-profile.json').read_text())
+    arguments=dict(profile['arguments'],seconds=a.seconds,capture_count=8)
+    if not getattr(a,'auto_setup_raw',False):
+        arguments.update(quality_dial_steps=0,menu_actions='',quality_after_menu=False,
+            quality_after_wake=False,exposure_mode_steps=0,exposure_shutter_steps=0,
+            post_capture_recovery=False,post_capture_ready_menu=False,finish_on_fresh_liveview=False)
+    argv=['--name','z9-interactive','--firmware',str(a.firmware),'--raw',str(a.raw),
+          '--output',str(a.output)]
+    if a.qemu is not None:argv+=['--qemu',str(a.qemu)]
+    for key,value in arguments.items():
+        flag='--'+key.replace('_','-')
+        if value is True:argv.append(flag)
+        elif value is not False and value is not None:argv += [flag,str(value)]
+    return argv
+
+
 def interactive(a):
     """Reuse the native capture profile in the browser's existing guest."""
     from capture_support import full_sensor
     full_sensor(a.raw)
-    profile=json.loads((HERE/'capture-lossless14-profile.json').read_text())
-    argv=['--name','z9-interactive','--firmware',str(a.firmware),'--raw',str(a.raw),
-          '--output',str(a.output)]
-    if a.qemu is not None:argv+=['--qemu',str(a.qemu)]
-    for key,value in dict(profile['arguments'],seconds=a.seconds,capture_count=8).items():
-        flag='--'+key.replace('_','-')
-        if value is True:argv.append(flag)
-        elif value is not False and value is not None:argv += [flag,str(value)]
-    return main(argv,web=a)
+    return main(interactive_arguments(a),web=a)
 
 
 def main(argv=None, *, web=None):
+    manual_browser=web is not None and not getattr(web,'auto_setup_raw',False)
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--name',required=True);ap.add_argument('--seconds',type=int,default=120)
     ap.add_argument('--fast-capture',action='store_true',
@@ -156,7 +167,7 @@ def main(argv=None, *, web=None):
     if args.menu_only and not menu_actions:ap.error('menu-only requires navigation actions')
     if args.finish_on_fresh_liveview and not (args.post_capture_recovery and args.post_capture_ready_menu):
         ap.error('fresh-frame completion requires the two post-shot menu readiness gates')
-    if args.capture_count > 1 and not (args.finish_on_fresh_liveview and args.post_capture_ready_menu and args.post_capture_recovery):
+    if args.capture_count > 1 and not manual_browser and not (args.finish_on_fresh_liveview and args.post_capture_ready_menu and args.post_capture_recovery):
         ap.error('repeated photos require completed image work, actual post-shot menus and fresh liveview gates')
     if args.capture_count > 1 and not (args.engine153_inplace_identity and args.engine151_raw_output and args.d980_stream and args.nvme_card):
         ap.error('repeated RAW photos require fresh full DMA, neutral NR, actual RAW output and one owned virtual card')
@@ -531,10 +542,16 @@ def main(argv=None, *, web=None):
             self.browser_before={}
             self.browser_photos=[]
             self.browser_started=time.monotonic()
+            self.browser_card_ready=None
             if web is not None:
-                # Startup selects the same verified RAW format/compression,
-                # then waits for the operator instead of pressing the shutter.
                 self.states=self.states[:self.preparation_prefix]
+                if manual_browser:
+                    # Release the bootstrap half-press; no menu, quality,
+                    # exposure or rotary inputs are synthesized at startup.
+                    body=bytearray(124);body[0]=body[4]=1
+                    self.states=[dict(label='startup-release-bootstrap-half',body_hex=body.hex(),
+                        expected_hex=struct.pack('<11I',0x200,*([0]*10)).hex(),hold_ns=500000000)]
+                    self.preparation_prefix=1
             self.interactive_actions=[];self.interactive_finished=False;self.interactive_ready_at=None
             self.index=0;self.active=None;self.next_probe=0;self.next_virtual=None
             self.capture=dict(sequence=args.sequence,start_at=args.start_at,settle_seconds=args.settle_seconds,
@@ -568,6 +585,7 @@ def main(argv=None, *, web=None):
                 shutter_steps=args.exposure_shutter_steps,start_state=self.exposure_start,
                 states=self.preparation_prefix-self.exposure_start,
                 scope='external MODE/main dial; native LCD determines selected mode and shutter')
+            if manual_browser:self.capture['exposure_input']['states']=0
             self.capture['trace_profile']='compact preparation contacts, full capture observations' if args.fast_capture else 'full contact snapshots'
             self.capture['quality_input']=dict(dial_steps=args.quality_dial_steps,states=self.quality_prefix,
                 native_format_verified=False,scope='original external QUAL/dial inputs; no setting RAM edits')
@@ -577,6 +595,7 @@ def main(argv=None, *, web=None):
             self.capture['navigation_input']=dict(actions=menu_actions,
                 states=self.preparation_prefix-self.quality_prefix,menu_only=args.menu_only,
                 native_selection_verified=False,scope='external original decoder inputs; verify native LCD separately')
+            if manual_browser:self.capture['navigation_input']['states']=0
             self.capture['navigation_queue']=dict(enabled=bool(args.navigation_file),commands=[],snapshots=[])
             self.app_points={0x40d291e4:'changed_status_callback',0x40d5e4ec:'app_key_event',
                 0x40d5f6d4:'state_key_event',0x40d5be94:'state_input_dispatch',
@@ -1240,10 +1259,12 @@ def main(argv=None, *, web=None):
             if (not self.browser_prepared or not self.browser_idle) and time.monotonic()-self.browser_started>600:
                 raise TimeoutError('Native photo preparation/capture exceeded the 600 second host bound')
             return dict(capture_supported=True,capture_busy=not self.browser_idle,
+                automatic_setup=not manual_browser,
                 manual_ready=self.browser_prepared and self.browser_idle,
                 capture_ready=self.browser_prepared and self.browser_idle and self.capture_cycle<=8,
-                capture_phase=('Preparing RAW capture' if not self.browser_prepared else
-                               'Ready' if self.browser_idle else 'Capturing and recovering'),
+                capture_phase=(('Waiting for camera' if manual_browser else 'Preparing RAW capture') if not self.browser_prepared else
+                               'Ready' if self.browser_idle else
+                               'Capturing and saving' if manual_browser else 'Capturing and recovering'),
                 photos=list(self.browser_photos),capture_limit=8)
 
         def request_capture(self):
@@ -1257,13 +1278,16 @@ def main(argv=None, *, web=None):
             self.preparation_prefix=len(self.states)
             self.states += [dict(row) for row in self.contact_states]
             self.post_capture_start=len(self.states)
-            self.states += recovery_states()
+            if not manual_browser:self.states += recovery_states()
             self.capture['post_capture_recovery']=recovery(self.post_capture_start)
+            if manual_browser:self.capture['post_capture_recovery'].update(enabled=False,
+                scope='user-controlled recovery; no automatic menu or half-shutter contacts')
             self.capture_baseline=None
             self.capture['all_inputs_consumed']=False
             self.capture['capture_complete']=False;self.capture['file_saved']=False
             self.browser_idle=False
             self.browser_started=time.monotonic()
+            self.browser_card_ready=None
             self.next_virtual=runner.state(self.g,'runtime-clock-state')['virtual_ns']+500000000
             self.g.qmp.command('cont')
 
@@ -1282,9 +1306,43 @@ def main(argv=None, *, web=None):
                 if web is not None and self.browser_idle:
                     latest=self.g.data.get('latest_pipeline',{})
                     lcd=latest.get('lcd',{})
-                    if (virtual>=self.next_virtual and lcd.get('last_frame_has_video') and
-                            lcd.get('video_frames',0)>=8):
+                    if (virtual>=self.next_virtual and
+                            (manual_browser or (lcd.get('last_frame_has_video') and lcd.get('video_frames',0)>=8))):
                         self.browser_prepared=True
+                    return False
+                if manual_browser:
+                    if virtual<self.next_virtual:return False
+                    from capture_workflow_ready import image_work
+                    from capture_support import card_photos,export_new_photos
+                    work=image_work(runner.state(self.g,'engine15e2-jpeg-state'),
+                        runner.state(self.g,'engine151-raw-output-state'),
+                        self.g.data.get('jpeg_completed_native_dumps',[]),(8256,5504),
+                        baseline=self.capture_baseline)
+                    self.capture['manual_image_work']=work
+                    if not work['ready']:return False
+                    self.g.qmp.command('stop');self.handle()
+                    try:
+                        try:rows=card_photos(web.card)[0]
+                        except ValueError as exc:
+                            self.capture['manual_card_wait']=str(exc);self.browser_card_ready=None;return False
+                        fresh=[r for name,r in rows.items() if name not in self.browser_before]
+                        signature=tuple(sorted((r['path'],r['bytes'],r['valid_bytes']) for r in fresh))
+                        if not fresh or any(not 0<r['bytes']<=256*1024*1024 or r['bytes']!=r['valid_bytes'] for r in fresh):
+                            self.browser_card_ready=None;return False
+                        if self.browser_card_ready is None or self.browser_card_ready[0]!=signature:
+                            self.browser_card_ready=(signature,virtual);return False
+                        if virtual-self.browser_card_ready[1]<2000000000:return False
+                        photos=export_new_photos(web.card,self.browser_before,
+                            self.g.out/'photos'/('shot-'+str(self.capture_cycle)))
+                        self.browser_photos.extend(photos)
+                        self.capture.setdefault('saved_photos',[]).extend(photos)
+                        self.capture.setdefault('manual_photo_cycles',[]).append(dict(
+                            cycle=self.capture_cycle,baseline=self.capture_baseline,image_work=work,
+                            automatic_menu_recovery=False,photos=photos))
+                        self.capture['capture_complete']=True;self.capture['file_saved']=True
+                        self.capture_cycle+=1;self.browser_idle=True;session.capture_pending=False
+                        print('Native photograph saved without automatic menu inputs: '+', '.join(p['name'] for p in photos),flush=True)
+                    finally:self.g.qmp.command('cont')
                     return False
                 if args.navigation_file and not self.interactive_finished:
                     if virtual<self.next_virtual+2000000000:return False
@@ -1396,6 +1454,10 @@ def main(argv=None, *, web=None):
                 return False
             latest=self.g.data.get('latest_pipeline',{})
             if latest.get('raw',{}).get('frames',0)<8:return False
+            if manual_browser and self.index==0 and not runner.live_view_ready(latest.get('raw',{}),latest.get('lcd',{})):
+                # Keep the bootstrap hold until actual preview initialization,
+                # then release it before handing all UI inputs to the operator.
+                return False
             preparation_in_progress=0<self.index<=self.preparation_prefix
             # A blackout after shutter press must not block the external
             # release/wake/menu inputs needed to recover from that blackout.

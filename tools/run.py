@@ -154,6 +154,10 @@ class Session:
 
 def state(g,name):return json.loads(g.qmp.command('qom-get',path='/machine',property=name))
 
+def live_view_ready(raw,lcd):
+    return (raw.get('frames',0)>=8 and lcd.get('video_frames',0)>=8 and
+            lcd.get('last_frame_has_video',False))
+
 def worker(a,s):
     log_guard=None
     try:
@@ -201,8 +205,7 @@ def worker(a,s):
                     screen=g.out/'display.ppm';g.qmp.command('screendump',filename=str(screen))
                     with Image.open(screen) as im:
                         buf=io.BytesIO();im.save(buf,format='PNG');s.png=buf.getvalue()
-                    ready=(raw['frames']>=8 and lcd.get('video_frames',0)>=8 and
-                           lcd.get('last_frame_has_video',False))
+                    ready=live_view_ready(raw,lcd)
                     available=ready or bool(initial_frames)
                     capture_status=(peer.browser_status() if hasattr(peer,'browser_status') else
                         dict(capture_supported=False,capture_ready=False,manual_ready=True,
@@ -333,6 +336,8 @@ def argument_parser():
     p.add_argument('--firmware',type=Path,required=True);p.add_argument('--qemu',type=Path)
     p.add_argument('--raw',type=Path,default=ROOT/'.local/z9-14bit.raw')
     p.add_argument('--preview-only',action='store_true',help='omit the full RAW capture profile')
+    p.add_argument('--auto-setup-raw',action='store_true',
+        help='opt in to automatic RAW quality setup and post-photo menu acceptance checks')
     cards=p.add_mutually_exclusive_group()
     cards.add_argument('--card',type=Path,default=DEFAULT_CARD,
         help='existing MBR exFAT .raw card; default: %(default)s; guest writes persist')
@@ -354,6 +359,8 @@ def main():
     if a.card is not None and not a.card.is_file():
         p.error(f'Virtual card does not exist: {a.card}; supply --card PATH or use --no-card')
     if a.card_snapshot and a.card is None:p.error('--card-snapshot requires a card')
+    if a.auto_setup_raw and (a.preview_only or a.card is None or a.card_snapshot or a.menu_test or a.headless):
+        p.error('--auto-setup-raw requires an interactive capture session with a persistent card')
     if not a.raw.exists() and a.raw==ROOT/'.local/z9-14bit.raw':
         from make_cmos import generate
         print('Generating full-resolution 14-bit sensor input',flush=True)

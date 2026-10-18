@@ -10,17 +10,31 @@ python tools/run.py --firmware /path/to/main.bin \
 The output directory must be new. Keep it local. The default is a timestamped
 directory beneath `.local/`. Open `http://127.0.0.1:8789/`.
 
-With a persistent card and full-resolution input, the browser prepares the
-verified lossless14 RAW configuration in the original camera menu, then enables
-**📷 拍照**. Each click runs one full shutter press/release, native processing,
-write-card completion and live-view/menu recovery in the same guest. ISO and
-shutter adjustments made after preparation stay in that guest. Select **S**
-single drive mode first. Manual controls wait while preparation or a photo is
-in progress. Up to eight released single photos are allowed per session;
+Normal startup uses **manual control**. It supplies the required boot/device
+handshakes, waits for actual live-view initialization, and releases the
+bootstrap half-shutter, then leaves image quality,
+ISO, exposure mode, shutter and menus to the user. It sends no automatic QUAL,
+dial or MENU sequence. It also sends no automatic post-photo menu/recovery
+sequence. The full-resolution `.raw` sensor input is a peripheral fixture,
+not a camera image-quality selection.
+
+With a persistent card and full-resolution input, **📷 拍照** runs the requested
+half/full/released shutter cycle and native processing in the same guest.
+Select **S** single drive mode and the verified **RAW / Lossless compressed**
+quality yourself through the original menu. Other image-quality paths retain
+their verification limits. Controls wait during the requested photo's image
+work and write-card completion; manually half-press afterward if live view
+needs waking. Up to eight released single photos are allowed per session;
 continuous burst is not enabled by this button.
 
+To explicitly restore automated RAW setup and the two post-shot menu acceptance
+round trips, add `--auto-setup-raw`. The standalone `tools/capture.py` and
+`--menu-test` remain explicitly requested automated tests. They are not the
+normal interactive startup path.
+
 Success requires a new, fully initialized NEF/JPEG entry on the actual card,
-not just an input acknowledgement or a changed frame. After recovery, the
+not just an input acknowledgement or a changed frame. After complete RAW/JPEG
+work and a stable, initialized new file entry, the
 runner pauses the guest, reads the card without modifying it, and exports
 the newly saved files to `OUTPUT/photos/shot-N/`. The page then shows download
 links. It never assembles a substitute camera file. `POST /capture` reserves
@@ -41,8 +55,23 @@ python tools/make_cmos.py --width 8280 --height 5520 --bits 14 \
 retain the preview workflow. Explicit small/12-bit `--raw` inputs also run
 preview only; the photo button stays disabled. A full input may use either
 8256×5504 or 8280×5520 14-bit RGGB, with an exact NZ9RAW1 file length. Initial
-preparation and full photo processing can take minutes. A 600 s host bound
-detects a stalled preparation/photo; original firmware timers are unchanged.
+automated preparation (when explicitly enabled) and full photo processing can
+take minutes. A 600 s host bound detects a stalled preparation/photo; original
+firmware timers are unchanged. Default `--seconds 0` leaves the session running
+until Ctrl+C; idle time does not trigger any UI actions.
+
+For example, normal manual control is simply:
+
+```sh
+python tools/run.py --firmware /path/to/main.bin --port 8789
+```
+
+Do not add `--auto-setup-raw` or `--menu-test` when all menu/settings actions
+should come from the user. To intentionally run the previous automated setup:
+
+```sh
+python tools/run.py --firmware /path/to/main.bin --auto-setup-raw
+```
 
 The preview-only controller starts with half-shutter held to keep the active capture path
 running. MENU releases half-shutter and sends one MENU press/release pair.

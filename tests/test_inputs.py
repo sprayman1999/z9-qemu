@@ -18,17 +18,25 @@ from service_z9_mcu import Peer
 from validate_run import MenuAcceptance
 from z9_global1_boundary_input import Peer as BoundaryPeer
 from z9_navigation_input import key_body as navigation_body, states as navigation_states
-from run import DEFAULT_CARD, EXPOSURE_COMMANDS, KEY_COMMANDS, KeyController, Session, argument_parser, decoded_contact, make_handler
+from run import DEFAULT_CARD, EXPOSURE_COMMANDS, KEY_COMMANDS, KeyController, Session, argument_parser, decoded_contact, make_handler, live_view_ready
 from z9_exposure_input import adjustment_states, state as exposure_state, states as exposure_states
 
 
 class InteractiveKeys(unittest.TestCase):
+    def test_startup_requires_real_video_before_releasing_bootstrap_hold(self):
+        self.assertFalse(live_view_ready({'frames':1000},{'video_frames':0,'last_frame_has_video':False}))
+        self.assertFalse(live_view_ready({'frames':8},{'video_frames':8,'last_frame_has_video':False}))
+        self.assertFalse(live_view_ready({'frames':7},{'video_frames':8,'last_frame_has_video':True}))
+        self.assertTrue(live_view_ready({'frames':8},{'video_frames':8,'last_frame_has_video':True}))
+
     def test_default_card_is_persistent_and_can_be_overridden_or_disabled(self):
         parser = argument_parser()
         base = ['--firmware', '/tmp/firmware.bin']
         args = parser.parse_args(base)
         self.assertEqual(args.card, DEFAULT_CARD)
         self.assertFalse(args.card_snapshot)
+        self.assertFalse(args.auto_setup_raw)
+        self.assertTrue(parser.parse_args(base+['--auto-setup-raw']).auto_setup_raw)
         self.assertEqual(parser.parse_args(base+['--no-card']).card, None)
         args = parser.parse_args(base+['--card', '/tmp/other.raw', '--card-snapshot'])
         self.assertEqual(args.card, Path('/tmp/other.raw'))

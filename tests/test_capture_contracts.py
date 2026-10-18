@@ -17,11 +17,30 @@ from ccomp_command_peer import reply_for
 from capture_workflow_ready import evaluate
 from virtual_recording_card import create, attach_existing
 from capture_support import card_photos, export_new_photos, full_sensor
+from capture_sequence import interactive_arguments
 from inspect_virtual_exfat import catalog
 from types import SimpleNamespace
 
 
 class CaptureContracts(unittest.TestCase):
+    def test_interactive_default_has_no_quality_exposure_or_menu_automation(self):
+        args=SimpleNamespace(firmware=Path('/tmp/main.bin'),raw=Path('/tmp/input.raw'),
+            output=Path('/tmp/new-run'),qemu=None,seconds=0,auto_setup_raw=False)
+        flags=interactive_arguments(args)
+        for name in ('--quality-dial-steps','--exposure-mode-steps','--exposure-shutter-steps'):
+            self.assertEqual(flags[flags.index(name)+1],'0')
+        self.assertEqual(flags[flags.index('--menu-actions')+1],'')
+        for name in ('--quality-after-wake','--quality-after-menu','--post-capture-recovery',
+                     '--post-capture-ready-menu','--finish-on-fresh-liveview'):
+            self.assertNotIn(name,flags)
+        self.assertIn('--engine151-raw-output',flags)
+        self.assertIn('--capture-gpio',flags)
+        args.auto_setup_raw=True
+        flags=interactive_arguments(args)
+        self.assertIn('--quality-after-wake',flags)
+        self.assertIn('--post-capture-recovery',flags)
+        self.assertNotEqual(flags[flags.index('--menu-actions')+1],'')
+
     def photo_card(self, directory):
         """Tiny synthetic filesystem fixture, not a camera-photo acceptance test."""
         path=Path(directory)/'photo-card.raw'
